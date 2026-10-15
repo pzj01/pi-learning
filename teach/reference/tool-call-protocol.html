@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>速查 · Tool Call 消息协议</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <p class="lesson-header__eyebrow">速查表 · 参考文档</p>
+  <h1>Tool Call 消息协议</h1>
+  <p class="lesson-header__lead">
+    OpenAI 兼容 API 里，一次工具调用的消息结构与字段。课程会回看很少，这份速查表才是你会反复翻的东西。
+    <br><span style="font-size:.85em;color:var(--ink-faint)">字段形状依据本机 <code>openai@7.32.0</code> 的 <code>resources/chat/completions.d.ts</code> 核对。</span>
+  </p>
+</header>
+
+<main>
+
+<h2>骨架：两次请求，四条消息</h2>
+
+<ol class="flow">
+  <li>user</li>
+  <li>→ 请求 1</li>
+  <li>assistant(tool_calls)</li>
+  <li>本地执行</li>
+  <li>tool</li>
+  <li>→ 请求 2</li>
+  <li>assistant(content)</li>
+</ol>
+
+<div class="codeblock">
+  <div class="codeblock__title">第二次请求的 messages 数组（顺序即真相）</div>
+<pre><code>[
+  { role: 'user',      content: '请计算 5 + 3' },                    <span class="tok-com">// ① 你的问题</span>
+  { role: 'assistant', content: null,                                <span class="tok-com">// ② 模型原样的回复</span>
+    tool_calls: [{ id: 'call_abc', type: 'function',
+                   function: { name: 'calculator',
+                               arguments: '{"operation":"add","a":5,"b":3}' } }] },
+  { role: 'tool',      tool_call_id: 'call_abc',                      <span class="tok-com">// ③ 你执行的结果</span>
+    content: '8' },
+]</code></pre>
+</div>
+
+<h2>字段速查</h2>
+
+<table>
+  <thead><tr><th>消息</th><th>必填</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><span class="role role--user">user</span></td>
+      <td><code>content</code></td>
+      <td>字符串。多模态时可为内容块数组。</td>
+    </tr>
+    <tr>
+      <td><span class="role role--assistant">assistant</span><br><span style="font-size:.85em;color:var(--ink-soft)">（模型产出）</span></td>
+      <td><code>tool_calls[]</code></td>
+      <td>决定调工具时 <code>content</code> 常为 <code>null</code>，意图全在 <code>tool_calls</code> 里。</td>
+    </tr>
+    <tr>
+      <td><span class="role role--assistant">assistant</span><br><span style="font-size:.85em;color:var(--ink-soft)">（你回填历史）</span></td>
+      <td><code>role</code></td>
+      <td>把模型返回的整个 message 对象原样 push 进历史即可，别自己拼。</td>
+    </tr>
+    <tr>
+      <td><span class="role role--tool">tool</span></td>
+      <td><code>tool_call_id</code><br><code>content</code></td>
+      <td><code>content</code> <strong>必须是字符串</strong>（<code>string | 文本块数组</code>），数字要先 <code>String()</code>。错误信息也作为 content 回传，这是让模型自我修正的常规做法。</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3><code>tool_calls</code> 元素的形状</h3>
+
+<div class="codeblock">
+  <div class="codeblock__title">ChatCompletionMessageFunctionToolCall</div>
+<pre><code>{
+  id: <span class="tok-kw">string</span>                        <span class="tok-com">// 唯一 ID，回传结果时用它配对</span>
+  type: <span class="tok-str">'function'</span>                <span class="tok-com">// 联合类型的判别字段，用它收窄</span>
+  function: {
+    name: <span class="tok-kw">string</span>                  <span class="tok-com">// 工具名，对应你 schema 里的 name</span>
+    arguments: <span class="tok-kw">string</span>             <span class="tok-com">// ⚠️ JSON 文本，不是对象，要 JSON.parse</span>
+  }
+}</code></pre>
+</div>
+
+<h2>最小骨架</h2>
+
+<div class="codeblock">
+  <div class="codeblock__title">TypeScript · 一次完整往返（无循环）</div>
+<pre><code><span class="tok-kw">const</span> messages: ChatCompletionMessageParam[] = [
+  { role: <span class="tok-str">'user'</span>, content: question },
+]
+
+<span class="tok-kw">for</span> (<span class="tok-kw">let</span> i = <span class="tok-num">0</span>; i &lt; MAX_STEPS; i++) {
+  <span class="tok-kw">const</span> res = <span class="tok-kw">await</span> openai.chat.completions.<span class="tok-fn">create</span>({ model, messages, tools })
+  <span class="tok-kw">const</span> msg = res.choices[<span class="tok-num">0</span>].message
+  messages.<span class="tok-fn">push</span>(msg)                                   <span class="tok-com">// 先入历史，顺序不能乱</span>
+
+  <span class="tok-kw">if</span> (!msg.tool_calls?.length) { <span class="tok-fn">console.log</span>(msg.content); <span class="tok-kw">break</span> }  <span class="tok-com">// 停止条件</span>
+
+  <span class="tok-kw">for</span> (<span class="tok-kw">const</span> call <span class="tok-kw">of</span> msg.tool_calls) {
+    <span class="tok-kw">if</span> (call.type !== <span class="tok-str">'function'</span>) <span class="tok-kw">continue</span>
+    <span class="tok-kw">const</span> args = JSON.<span class="tok-fn">parse</span>(call.function.arguments)
+    messages.<span class="tok-fn">push</span>({ role: <span class="tok-str">'tool'</span>, tool_call_id: call.id, content: <span class="tok-fn">dispatch</span>(call.function.name, args) })
+  }
+}</code></pre>
+</div>
+
+<p style="font-size:.9em;color:var(--ink-soft)">带循环的版本是第 2 课的内容；<code>dispatch</code> 是"按工具名分派执行"的占位，现在是那个 <code>switch</code>。</p>
+
+<h2>报错 → 病因对照</h2>
+
+<p>措辞随版本变化，看<strong>含义</strong>就行：</p>
+
+<table>
+  <thead><tr><th>报错的大意</th><th>真正的原因</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>role 为 <code>tool</code> 的消息必须是对前面 <code>tool_calls</code> 的回应</td>
+      <td>忘了把模型的 assistant 消息 push 进历史（实验 A）</td>
+    </tr>
+    <tr>
+      <td>assistant 的 <code>tool_calls</code> 后面的 tool 消息数量/ID 对不上</td>
+      <td>漏回了某次调用，或 <code>tool_call_id</code> 写错（实验 B）</td>
+    </tr>
+    <tr>
+      <td><code>TS2339: Property 'function' does not exist</code></td>
+      <td>没收窄联合类型，缺 <code>if (call.type !== 'function') continue</code></td>
+    </tr>
+    <tr>
+      <td><code>Unexpected token</code> / <code>JSON.parse</code> 抛异常</td>
+      <td>把 <code>arguments</code> 当成对象用了，或模型生成了非法 JSON</td>
+    </tr>
+    <tr>
+      <td>模型不调工具，直接编了个答案</td>
+      <td>工具 <code>description</code> 没写清"什么时候该用我"</td>
+    </tr>
+    <tr>
+      <td><code>reasoning_content</code> must be passed back（仅 thinking 模式）</td>
+      <td>重放历史时手工挑了字段重建 assistant 消息，把 <code>reasoning_content</code> 丢了。必须 push <strong>整个 message 对象</strong>，空字符串也不能省</td>
+    </tr>
+    <tr>
+      <td>不能把 tool call 消息插入对话中途</td>
+      <td>Chat Completions API 的限制，只能追加（<code>push</code>）。要插入得换 Anthropic <code>/messages</code> 或 Responses API</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout callout--why">
+  <span class="callout__label">一句话原理</span>
+  <p>模型<strong>无状态、不执行</strong>。它只会：读取你发的完整历史 → 输出下一条消息。所谓 "agent loop"，就是"把它的输出追加进历史、干它要求你干的活、再问一次"的循环。</p>
+</div>
+
+</main>
+
+<footer class="lesson-footer">
+  <ul class="lesson-nav">
+    <li><a href="../lessons/0001-tool-call-roundtrip.html">第 1 课 · 工具调用的完整往返</a></li>
+    <li><a href="../RESOURCES.md">资源清单</a></li>
+    <li><a href="../MISSION.md">学习使命</a></li>
+  </ul>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 1 课 · 工具调用的完整往返</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <p class="lesson-header__eyebrow">AI Agent 开发 · 第 1 课</p>
+  <h1>工具调用的完整往返</h1>
+  <p class="lesson-header__lead">
+    你的 <code>calculator</code> tool schema 已经写好了，但模型的手还没伸出来。
+    这一课只解决一件事：<strong>让模型请求一次工具调用，你执行它，再把结果交回去，直到模型开口说出最终答案。</strong>
+  </p>
+  <p class="lesson-header__meta">
+    <span>⏱ 约 45 分钟</span>
+    <span>🎯 对应 ROADMAP 阶段 1 前五项</span>
+    <span>🔧 需要动手改代码</span>
+  </p>
+</header>
+
+<main>
+
+<h2><span class="num">1</span>这一课要赢下什么</h2>
+
+<p>一个具体的、可验证的胜利：</p>
+
+<div class="callout callout--try">
+  <span class="callout__label">本节课的小胜利</span>
+  <p>在终端里跑通一次完整的工具调用往返，看到程序打印出的最终回答是 <code>5 + 3 = 8</code>，并且你<strong>能指着屏幕说清每条消息是谁产生的、为什么必须在那里</strong>。</p>
+</div>
+
+<p>我们<strong>故意不写 while 循环</strong>。原因是：循环本身只有三行，是个语法问题；真正难的是<strong>消息协议</strong>——第二次请求里必须塞进什么、顺序是什么、字段叫什么。手工把一次往返走通，循环就变成了显而易见的事。反过来先写循环，你会被"为什么报错说找不到 tool call"卡住很久。</p>
+
+<h2><span class="num">2</span>先预测，再看答案</h2>
+
+<p>研究一再表明：<strong>先猜、再验证</strong>的学习效果远好于直接阅读。别跳过这一步——花两分钟在纸上或心里写下你的答案。</p>
+
+<div class="recall">
+  <span class="recall__label">动手前，先预测</span>
+  <p>你要发一条 <code>"请计算 5 + 3 的结果"</code> 给模型，并附上 <code>tools: [calculatorTool]</code>。凭直觉回答：</p>
+  <ol>
+    <li>模型返回的 <code>message.content</code> 会是什么？是 <code>"8"</code> 吗？</li>
+    <li>模型自己算得出来 5 + 3 吗？它需要你的 calculator 吗？</li>
+    <li>如果模型要调工具，它是直接帮你执行了，还是只告诉你"我想调"？</li>
+  </ol>
+  <details>
+    <summary>做完第 3 节再展开答案（现在展开会损失一次检索练习）</summary>
+    <p><strong>1.</strong> 大概率是 <code>null</code>。当模型决定调用工具时，它的意图放在 <code>tool_calls</code> 字段里，<code>content</code> 往往是空的。</p>
+    <p><strong>2.</strong> 它算得出来——但这里的目标不是"能不能算"，而是让你看清协议。工具的价值在于模型<strong>算不准、或根本不知道</strong>的事（查数据库、调 API、读文件）。</p>
+    <p><strong>3.</strong> 只告诉你"我想调"。模型在 API 里<strong>没有任何执行能力</strong>，它只是输出一段结构化的 JSON，表明"请帮我调用 <code>calculator</code>，参数是这些"。真正的执行发生在<strong>你的代码里</strong>。这是整门课最重要的一个认知。</p>
+  </details>
+</div>
+
+<h2><span class="num">3</span>知识：一次往返 = 两次请求 + 四条消息</h2>
+
+<p>模型不能执行工具，但它可以<strong>"填一张申请表"</strong>。你的程序读完申请表，自己干活，再把回执贴回去，模型才能继续往下说。</p>
+
+<p>抽象成消息列表，一次完整的 tool call 是这样的：</p>
+
+<table>
+  <thead>
+    <tr><th>#</th><th>谁产生</th><th><code>role</code></th><th>关键字段</th><th>内容示例</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1</td><td>你</td><td><span class="role role--user">user</span></td>
+      <td><code>content</code></td><td>请计算 5 + 3 的结果</td>
+    </tr>
+    <tr>
+      <td>2</td><td><strong>模型</strong></td><td><span class="role role--assistant">assistant</span></td>
+      <td><code>tool_calls</code></td><td>我要调 <code>calculator</code>，参数 <code>{"operation":"add","a":5,"b":3}</code></td>
+    </tr>
+    <tr>
+      <td>3</td><td><strong>你的代码</strong></td><td><span class="role role--tool">tool</span></td>
+      <td><code>tool_call_id</code> + <code>content</code></td><td>call_abc 的结果是 8</td>
+    </tr>
+    <tr>
+      <td>4</td><td>模型</td><td><span class="role role--assistant">assistant</span></td>
+      <td><code>content</code></td><td>5 + 3 = 8</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>而这四条消息是分<strong>两次</strong>请求发出去的：</p>
+
+<ol class="flow">
+  <li>请求 1 <span style="color:var(--ink-faint)">[msg 1]</span></li>
+  <li>响应 1 <span style="color:var(--ink-faint)">[msg 2]</span></li>
+  <li>本地执行工具</li>
+  <li>请求 2 <span style="color:var(--ink-faint)">[msg 1,2,3]</span></li>
+  <li>响应 2 <span style="color:var(--ink-faint)">[msg 4]</span></li>
+</ol>
+
+<p>三个必须记住的点，全部来自协议本身：</p>
+
+<div class="cards">
+  <div class="card">
+    <h4>① <code>arguments</code> 是字符串</h4>
+    <p>你拿到手的 <code>call.function.arguments</code> 是一段 <strong>JSON 文本</strong>，不是对象。想用必须先 <code>JSON.parse()</code>。这是初学者最常踩的坑。</p>
+  </div>
+  <div class="card">
+    <h4>② 靠 <code>tool_call_id</code> 配对</h4>
+    <p>模型可能<strong>一次请求多个工具</strong>。结果消息必须带上 <code>tool_call_id</code>，模型才知道这条结果是对哪次调用的回答。ID 对不上就会报错。</p>
+  </div>
+  <div class="card">
+    <h4>③ 历史要完整</h4>
+    <p>第二次请求必须把<strong>第 2 条 assistant 消息原样带上</strong>。只发结果不发申请，模型会看到一个来路不明的 <code>tool</code> 消息。</p>
+  </div>
+</div>
+
+<div class="callout callout--why">
+  <span class="callout__label">为什么是这样设计的</span>
+  <p>这套协议的核心约束是：<strong>模型是无状态的</strong>。它不记得上一次请求发生过什么，每次你都要把完整历史发过去，它才"看到"了之前的一切。这也是为什么后面阶段 2 要专门讲上下文窗口——<strong>历史只会越来越长，而窗口是有限的</strong>。你现在写的 <code>messages.push(...)</code>，就是未来那个问题的起点。</p>
+</div>
+
+<div class="callout callout--source">
+  <span class="callout__label">一手来源</span>
+  <p>协议细节以 <a href="https://api-docs.deepseek.com/guides/tool_calls/">DeepSeek 官方的 Tool Calls 文档</a>为准 —— 你走的正是这个接口，它比任何二手教程都可信。原始规范见 <a href="https://developers.openai.com/api/docs/guides/function-calling">OpenAI 的 Function calling 指南</a>（提醒：OpenAI 文档主域已从 <code>platform.openai.com</code> 迁到 <code>developers.openai.com</code>，网上带旧域名的链接多数还有效但会重定向）。</p>
+</div>
+
+<h2><span class="num">4</span>动手：把 <code>index.ts</code> 改成一次完整往返</h2>
+
+<div class="callout callout--warn">
+  <span class="callout__label">动手前先建安全网</span>
+  <p><code>pi-learning/</code> <strong>目前不是 git 仓库</strong>。你自己的 README 里写着"实验前确认 Git 状态"，而 ROADMAP 阶段 0 也还留着"确认 Git 工作区干净"这一项没勾。先花一分钟补上，后面所有实验都能随时回滚：</p>
+  <div class="codeblock"><pre><code>cd ~/Desktop/pi-learning
+git init &amp;&amp; printf 'node_modules/\n.env\n' &gt;&gt; .gitignore
+git add -A &amp;&amp; git commit -m "chore: snapshot before agent loop work"</code></pre></div>
+  <p>已经建好就跳过。做完记得回 <a href="../../ROADMAP.md">ROADMAP.md</a> 勾掉阶段 0 那一项。</p>
+</div>
+
+<p>保持 <code>src/agent.ts</code> <strong>完全不动</strong>（你写好的 <code>calculatorTool</code> 正是我们要用的）。只重写 <code>src/index.ts</code>：</p>
+
+<div class="codeblock">
+  <div class="codeblock__title">mini-agent/src/index.ts</div>
+<pre><code><span class="tok-kw">import</span> { calculatorTool, openai } <span class="tok-kw">from</span> <span class="tok-str">'./agent'</span>
+<span class="tok-kw">import type</span> { ChatCompletionMessageParam } <span class="tok-kw">from</span> <span class="tok-str">'openai/resources/chat/completions'</span>
+
+<span class="tok-com">// 本地真正执行工具的代码。模型只会「填申请表」，干活的是这里。</span>
+<span class="tok-kw">function</span> <span class="tok-fn">runCalculator</span>(args: { operation: <span class="tok-kw">string</span>; a: <span class="tok-kw">number</span>; b: <span class="tok-kw">number</span> }): <span class="tok-kw">number</span> {
+  <span class="tok-kw">switch</span> (args.operation) {
+    <span class="tok-kw">case</span> <span class="tok-str">'add'</span>:      <span class="tok-kw">return</span> args.a + args.b
+    <span class="tok-kw">case</span> <span class="tok-str">'subtract'</span>: <span class="tok-kw">return</span> args.a - args.b
+    <span class="tok-kw">case</span> <span class="tok-str">'multiply'</span>: <span class="tok-kw">return</span> args.a * args.b
+    <span class="tok-kw">case</span> <span class="tok-str">'divide'</span>:
+      <span class="tok-kw">if</span> (args.b === <span class="tok-num">0</span>) <span class="tok-kw">throw new</span> <span class="tok-fn">Error</span>(<span class="tok-str">'除数不能为 0'</span>)
+      <span class="tok-kw">return</span> args.a / args.b
+    <span class="tok-kw">default</span>:
+      <span class="tok-kw">throw new</span> <span class="tok-fn">Error</span>(<span class="tok-str">`未知操作：${args.operation}`</span>)
+  }
+}
+
+<span class="tok-kw">async function</span> <span class="tok-fn">main</span>() {
+  <span class="tok-com">// 整个对话历史。模型是无状态的 —— 每次请求都得把这份完整历史发给它。</span>
+  <span class="tok-kw">const</span> messages: ChatCompletionMessageParam[] = [
+    { role: <span class="tok-str">'user'</span>, content: <span class="tok-str">'请计算 5 + 3 的结果'</span> },
+  ]
+
+  <span class="tok-com">// ── 请求 1：模型看到工具清单，决定要不要用 ─────────────────</span>
+  <span class="tok-kw">const</span> round1 = <span class="tok-kw">await</span> openai.chat.completions.<span class="tok-fn">create</span>({
+    model: <span class="tok-str">'deepseek-flash'</span>,
+    messages,
+    tools: [calculatorTool],
+    tool_choice: <span class="tok-str">'auto'</span>,
+  })
+
+  <span class="tok-kw">const</span> assistant = round1.choices[<span class="tok-num">0</span>].message
+  console.<span class="tok-fn">log</span>(<span class="tok-str">'第一轮 content   ='</span>, JSON.<span class="tok-fn">stringify</span>(assistant.content))
+  console.<span class="tok-fn">log</span>(<span class="tok-str">'第一轮 tool_calls ='</span>, JSON.<span class="tok-fn">stringify</span>(assistant.tool_calls, <span class="tok-kw">null</span>, <span class="tok-num">2</span>))
+
+  <span class="tok-com">// 把模型的这条回复原样并入历史 —— 少了这一步，后面的 tool 消息就成了"孤儿"</span>
+  messages.<span class="tok-fn">push</span>(assistant)
+
+  <span class="tok-com">// ── 本地执行模型"申请"的每一次工具调用 ───────────────────</span>
+  <span class="tok-kw">for</span> (<span class="tok-kw">const</span> call <span class="tok-kw">of</span> assistant.tool_calls ?? []) {
+    <span class="tok-kw">if</span> (call.type !== <span class="tok-str">'function'</span>) <span class="tok-kw">continue</span>   <span class="tok-com">// 联合类型必须收窄（见第 6 节）</span>
+
+    <span class="tok-kw">const</span> args = JSON.<span class="tok-fn">parse</span>(call.function.arguments)  <span class="tok-com">// arguments 是 JSON 文本，不是对象</span>
+    <span class="tok-kw">const</span> result = <span class="tok-fn">runCalculator</span>(args)
+
+    messages.<span class="tok-fn">push</span>({
+      role: <span class="tok-str">'tool'</span>,
+      tool_call_id: call.id,        <span class="tok-com">// 靠它把结果和请求配对</span>
+      content: <span class="tok-fn">String</span>(result),  <span class="tok-com">// content 必须是字符串</span>
+    })
+  }
+
+  <span class="tok-com">// ── 请求 2：模型看到结果，给出自然语言回答 ────────────────</span>
+  <span class="tok-kw">const</span> round2 = <span class="tok-kw">await</span> openai.chat.completions.<span class="tok-fn">create</span>({
+    model: <span class="tok-str">'deepseek-flash'</span>,
+    messages,
+    tools: [calculatorTool],
+    tool_choice: <span class="tok-str">'auto'</span>,
+  })
+
+  console.<span class="tok-fn">log</span>(<span class="tok-str">'最终回答：'</span>, round2.choices[<span class="tok-num">0</span>].message.content)
+}
+
+<span class="tok-fn">main</span>().<span class="tok-fn">catch</span>(console.error)</code></pre>
+</div>
+
+<p>运行：</p>
+
+<div class="codeblock"><pre><code>cd ~/Desktop/pi-learning/mini-agent
+pnpm start</code></pre></div>
+
+<p>你应该看到大致这样的输出（ID 和措辞会不同）：</p>
+
+<div class="codeblock">
+  <div class="codeblock__title">预期输出</div>
+<pre><code>第一轮 content   = null
+第一轮 tool_calls = [
+  {
+    "id": "call_0a1b2c3d",
+    "type": "function",
+    "function": {
+      "name": "calculator",
+      "arguments": "{\"operation\":\"add\",\"a\":5,\"b\":3}"
+    }
+  }
+]
+最终回答： 5 + 3 = 8</code></pre>
+</div>
+
+<p>注意 <code>arguments</code> 的值被<strong>转义引号包着</strong>——这是一个字符串，这就是第 ① 条坑的现场证据。</p>
+
+<h2><span class="num">5</span>检查理解</h2>
+
+<p>合上代码，凭记忆回答。答错比答对更有价值——错误正好标出了还没长牢的地方。</p>
+
+<div class="quiz" data-quiz>
+  <p class="quiz__question">
+    <span class="quiz__index">检查 1 / 3</span>
+    你拿到 <code>tool_calls[0].function.arguments</code> 时，它是什么？
+  </p>
+  <div class="quiz__options">
+    <button class="quiz__option" data-hint="如果是对象，就不需要 <code>JSON.parse</code> 了 —— 但你的代码里偏偏调了它。">一个已解析好的对象</button>
+    <button class="quiz__option" data-hint="协议里只传文本，没有任何文件路径字段。">一个指向工具的文件</button>
+    <button class="quiz__option" data-correct>一个未解析的字符串</button>
+    <button class="quiz__option" data-hint="这是 <code>messages</code> 数组的角色，不是单个参数的形状。">一个包含多轮的历史</button>
+  </div>
+  <div class="quiz__explain hidden">
+    模型输出的 JSON 里，<code>arguments</code> 是<strong>被转义过的文本</strong>，不是嵌套对象。用法永远是 <code>JSON.parse(call.function.arguments)</code>。而且模型不保证生成合法 JSON，所以真实项目里这个 <code>parse</code> 必须包在 <code>try/catch</code> 里——这正是阶段 2 要补的错误处理。
+  </div>
+  <div class="quiz__feedback"></div>
+</div>
+
+<div class="quiz" data-quiz>
+  <p class="quiz__question">
+    <span class="quiz__index">检查 2 / 3</span>
+    工具结果消息里，必须带上什么，模型才能认出这是对哪次调用的回答？
+  </p>
+  <div class="quiz__options">
+    <button class="quiz__option" data-correct>必须带上被调用工具的编号</button>
+    <button class="quiz__option" data-hint="名字能说明调了哪个工具，但模型一次可能调同一个工具两次，名字区分不开。">必须带上被调用工具的名称</button>
+    <button class="quiz__option" data-hint="说明是给模型看的，用来决定<em>要不要</em>调；它不参与结果配对。">必须带上被调用工具的说明</button>
+    <button class="quiz__option" data-hint="结果是你自己算的。模型要的不是结果本身，而是结果和请求的对应关系。">必须带上被调用工具的结果</button>
+  </div>
+  <div class="quiz__explain hidden">
+    就是 <code>tool_call_id</code>。模型可以在一次回复里发出<strong>多个</strong> tool call（并行调用），所以必须靠唯一 ID 配对，而不是工具名。少了它或写错它，API 会直接拒绝这次请求。
+  </div>
+  <div class="quiz__feedback"></div>
+</div>
+
+<div class="quiz" data-quiz>
+  <p class="quiz__question">
+    <span class="quiz__index">检查 3 / 3</span>
+    第二次请求的 <code>messages</code> 数组，顺序应该是？
+  </p>
+  <div class="quiz__options">
+    <button class="quiz__option" data-hint="工具结果排在它的申请之前了 —— 模型会读到一条来历不明的结果。">用户消息 → 工具结果 → 助手请求</button>
+    <button class="quiz__option" data-correct>用户消息 → 助手请求 → 工具结果</button>
+    <button class="quiz__option" data-hint="助手的申请排在用户提问之前，时间顺序倒过来了。">助手请求 → 用户消息 → 工具结果</button>
+    <button class="quiz__option" data-hint="用户提问被挤到中间了，那么模型不知道你到底要它干什么。">工具结果 → 用户消息 → 助手请求</button>
+  </div>
+  <div class="quiz__explain hidden">
+    历史必须按<strong>真实发生的时间顺序</strong>排列：先有你的问题，模型才提出申请，你才有结果。这也是为什么代码里用 <code>messages.push(...)</code> 追加，而不是到处 <code>unshift</code>。
+  </div>
+  <div class="quiz__feedback"></div>
+</div>
+
+<p class="quiz__score" data-quiz-score></p>
+
+<h2><span class="num">6</span>踩坑预警：TypeScript 的联合类型</h2>
+
+<p>如果你把第 4 节代码里的 <code>if (call.type !== 'function') continue</code> 删掉，<code>tsc</code> 会报这个错：</p>
+
+<div class="codeblock">
+  <div class="codeblock__title">tsc 报错（真实复现过）</div>
+<pre><code>error TS2339: Property 'function' does not exist on type 'ChatCompletionMessageToolCall'.
+  Property 'function' does not exist on type 'ChatCompletionMessageCustomToolCall'.</code></pre>
+</div>
+
+<p>原因：SDK 里 <code>ChatCompletionMessageToolCall</code> 其实是一个<strong>联合类型</strong>——<code>Function</code> 型（有 <code>function</code> 字段）和 <code>Custom</code> 型（有 <code>custom</code> 字段）。你只定义了 function 型工具，所以要用 <code>if (call.type !== 'function') continue</code> 把类型"收窄"到那一支。<a class="cite" href="../../mini-agent/node_modules/openai/resources/chat/completions.d.ts">↗</a></p>
+
+<p>这不是障碍，是提醒：<strong>模型可以调用的东西不止一种，你的执行器必须按类型分派</strong>。等工具多起来，这个 <code>switch</code> 会长成一个注册表——那正是 Pi 这类项目里"工具系统"的雏形。</p>
+
+<h2><span class="num">7</span>另一个坑：thinking 模式要求回传 <code>reasoning_content</code></h2>
+
+<p>这个坑不属于 TypeScript，属于 DeepSeek 协议本身，而且<strong>直接关系到你当前的代码</strong>。</p>
+
+<p>你原来的请求里写着 <code>reasoning_effort: 'high'</code> —— 这是合法参数，会让模型进入 thinking（思考）模式。而官方文档规定：</p>
+
+<div class="callout callout--warn">
+  <span class="callout__label">DeepSeek 官方规则</span>
+  <p>thinking 模式下，<strong>一旦发生过工具调用，之前每一轮的 <code>reasoning_content</code> 都必须在后续请求中完整回传</strong>，否则请求被拒（HTTP 400，大意是「<code>reasoning_content</code> 必须传回」）。而且<strong>空字符串 <code>""</code> 也不能丢</strong>。</p>
+  <p style="margin-top:.6em;font-size:.9em">出处：<a href="https://api-docs.deepseek.com/api_samples/thinking_mode_api_example_tool_call/">DeepSeek — Thinking 模式下的 tool call 示例</a>。</p>
+</div>
+
+<p>这条规则的杀伤力在于它的<strong>持续性</strong>：很多客户端重放历史时，习惯只挑 <code>role</code>、<code>content</code>、<code>tool_calls</code> 三个字段重新拼一个对象。这么一拼 <code>reasoning_content</code> 就丢了，而这条被污染的消息会<strong>在之后每一次请求里被重放</strong>，于是整个会话持续 400，只能推倒重来。genkit、n8n、乃至 DeepSeek 自己的 harness 都在这里翻过车。</p>
+
+<div class="callout callout--why">
+  <span class="callout__label">你的代码为什么天然避开了这个坑</span>
+  <p>因为我们 push 的是<strong>模型返回的整个 message 对象</strong>：</p>
+  <div class="codeblock"><pre><code>messages.<span class="tok-fn">push</span>(assistant)   <span class="tok-com">// ✅ 整个对象，reasoning_content 等一切字段原样带上</span></code></pre></div>
+  <p>而不是手工重建：</p>
+  <div class="codeblock"><pre><code>messages.<span class="tok-fn">push</span>({
+  role: <span class="tok-str">'assistant'</span>,
+  content: assistant.content,
+  tool_calls: assistant.tool_calls,   <span class="tok-com">// ❌ 悄无声息地丢掉了 reasoning_content</span>
+})</code></pre></div>
+  <p>这不是运气，正是第 ③ 条「历史要完整」的具体后果：<strong>永远不要手工挑字段重建 assistant 消息。</strong>这个小习惯以后会替你省掉一整类极难排查的 bug。</p>
+</div>
+
+<div class="callout callout--source">
+  <span class="callout__label">诚实说明</span>
+  <p><code>reasoning_effort: 'high'</code> 是否真的让 <code>deepseek-flash</code> 进入 thinking 模式、从而是否触发这条规则，我<strong>没有实测过</strong>（实测要动用你的 API key）。所以：<strong>第一次运行如果报 400 且提到 <code>reasoning_content</code>，就是这条</strong>，告诉我我们一起处理；<strong>如果顺利跑通</strong>，说明这次没走 thinking 路径，这条规则暂时不影响你——但以后想开 thinking 时它一定会回来。</p>
+</div>
+
+<h2><span class="num">8</span>验证你的理解：三个破坏性实验</h2>
+
+<p>能跑通不代表理解。真正把理解钉牢的办法是<strong>故意弄坏它，然后预测会发生什么、再验证</strong>。每个实验只改一行，改完记得改回来。</p>
+
+<ul class="checklist">
+  <li><strong>实验 A</strong>：把 <code>messages.push(assistant)</code> 注释掉。先写下你预测的报错，再运行。<br>
+      <span style="font-size:.88em;color:var(--ink-soft)">它在验证：模型认的是<em>消息历史</em>，不是你的意图。</span></li>
+  <li><strong>实验 B</strong>：把 <code>tool_call_id: call.id</code> 改成 <code>tool_call_id: 'abc'</code>。同样先预测再运行。<br>
+      <span style="font-size:.88em;color:var(--ink-soft)">它在验证：配对是按 ID 严格做的。</span></li>
+  <li><strong>实验 C</strong>：把请求里的用户消息改成 <code>'请计算 5 除以 0'</code>，观察 <code>runCalculator</code> 抛出的异常怎么结束程序。<br>
+      <span style="font-size:.88em;color:var(--ink-soft)">它在验证：工具抛错时，agent 目前<em>直接崩了</em>。这正是阶段 2 "错误处理"要解决的问题。</span></li>
+</ul>
+
+<div class="callout callout--try">
+  <span class="callout__label">把结果记下来</span>
+  <p>按你自己 ROADMAP 里的模板，把三个实验的实际报错和你的预测差异写进 <code>notes/</code>。<strong>预测和实际不一致的地方，就是你下一个要搞懂的机制。</strong></p>
+</div>
+
+<h2><span class="num">9</span>下一步</h2>
+
+<p>你现在有了四条消息的全貌，也知道了"再来一轮"该怎么做。第 2 课的主题是把这两次请求<strong>折成循环</strong>，并第一次认真处理"什么时候停"——因为一旦有了循环，模型可以连续调工具，你需要一道刹车。</p>
+
+<p>那节课之后你就会发现：今天这四行 <code>messages.push</code> 会长成整个 agent 的骨架。</p>
+
+<div class="callout callout--source">
+  <span class="callout__label">主要参考资源</span>
+  <p><strong>必读</strong>：<a href="https://api-docs.deepseek.com/guides/tool_calls/">DeepSeek 官方的 Tool Calls 文档</a>。本课协议细节的一手来源，读完你就能自己核对上面每一句话。读的时候留意两点：<code>tool_choice</code> 有四种取值（我们只用了 <code>auto</code>），以及 <code>strict</code> schema 模式（beta）能让参数严格匹配你的定义。</p>
+  <p style="margin-top:.7em"><strong>接着读（第 2 课之前）</strong>：<a href="https://github.com/openai/openai-cookbook/blob/main/examples/How_to_build_an_agent_with_the_node_sdk.mdx">OpenAI 官方 cookbook 的 Node SDK agent 示例</a> —— 语言、SDK、要做的事和你完全一致，是用来对照你自己实现的最佳材料。</p>
+</div>
+
+</main>
+
+<footer class="lesson-footer">
+  <p><strong>有疑问随时问我。</strong>我是你的老师，不只是出课的人——哪一步报错了、哪句话没看懂、"为什么非要这样设计"，直接问，比你自己卡半小时划算得多。</p>
+  <ul class="lesson-nav">
+    <li><a href="../MISSION.md">学习使命</a></li>
+    <li><a href="../RESOURCES.md">资源清单</a></li>
+    <li><a href="../../ROADMAP.md">总路线图</a></li>
+    <li><a href="../../notes/">你的笔记</a></li>
+  </ul>
+</footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

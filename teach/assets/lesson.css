@@ -1,0 +1,449 @@
+/* ==========================================================================
+   lesson.css — AI Agent 开发课程共享样式
+   所有 lesson 都链接此文件，保证整套课程看起来是一门课而不是一堆散页。
+   设计取向：Tufte 式排版 —— 窄行宽、留白充裕、印刷友好。
+   ========================================================================== */
+
+/* --- 设计变量 ------------------------------------------------------------ */
+:root {
+  --paper:      #fdfcfa;
+  --paper-alt:  #f4f1ec;
+  --ink:        #1c1b19;
+  --ink-soft:   #55524c;
+  --ink-faint:  #8a8579;
+  --rule:       #ddd8cf;
+
+  --accent:     #9c4221;  /* 装饰线与强调：烧赭色 */
+  --link:       #2b6a8f;  /* 链接：灰蓝 */
+
+  --role-user:      #2b6a8f;
+  --role-assistant: #9c4221;
+  --role-tool:      #4a7c59;
+  --role-system:    #6b5b95;
+
+  --ok:         #3f7d52;
+  --ok-bg:      #e8f2ea;
+  --bad:        #b03a2e;
+  --bad-bg:     #fbeae8;
+
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Source Han Serif SC",
+           "Noto Serif CJK SC", "Songti SC", "STSong", Georgia, serif;
+  --sans:  -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+           "Microsoft YaHei", "Segoe UI", sans-serif;
+  --mono:  "SF Mono", ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo,
+           Consolas, "Liberation Mono", monospace;
+
+  --measure: 40rem;   /* 每行约 35–40 个中文字，working memory 友好 */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper:      #17171a;
+    --paper-alt:  #202024;
+    --ink:        #e6e3dd;
+    --ink-soft:   #a9a49b;
+    --ink-faint:  #756f66;
+    --rule:       #34333a;
+
+    --accent:     #e08a5f;
+    --link:       #7fb6d6;
+
+    --role-user:      #7fb6d6;
+    --role-assistant: #e08a5f;
+    --role-tool:      #8ec49d;
+    --role-system:    #b3a3e0;
+
+    --ok:     #8ec49d;  --ok-bg:  #1c2b20;
+    --bad:    #e88b80;  --bad-bg: #2e1c1a;
+  }
+}
+
+/* --- 基础 ---------------------------------------------------------------- */
+* { box-sizing: border-box; }
+
+/* 工具类。quiz 的答案原文用 .hidden 藏起来，靠 quiz.js 在答对后取它的
+   innerHTML 显示到反馈区 —— 所以这里必须是 display:none，否则答案会剧透 */
+.hidden { display: none !important; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  padding: 4rem 2rem 8rem;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 18px;
+  line-height: 1.75;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+main, .lesson-header, .lesson-footer { max-width: var(--measure); margin: 0 auto; }
+
+p { margin: 0 0 1.15em; }
+
+a { color: var(--link); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:hover { text-decoration-thickness: 2px; }
+
+strong { font-weight: 650; }
+em { font-style: italic; }
+
+hr {
+  border: 0; border-top: 1px solid var(--rule);
+  margin: 3rem 0;
+}
+
+/* --- 标题 ---------------------------------------------------------------- */
+h1, h2, h3, h4 { font-weight: 600; line-height: 1.3; color: var(--ink); }
+
+h1 {
+  font-size: 2rem;
+  margin: 0 0 .35em;
+  letter-spacing: -.01em;
+}
+
+h2 {
+  font-size: 1.28rem;
+  margin: 3rem 0 1rem;
+  padding-bottom: .3rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+h3 { font-size: 1.05rem; margin: 2rem 0 .6rem; }
+
+h2 .num, h3 .num {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  margin-right: .45em;
+}
+
+/* --- lesson header / footer --------------------------------------------- */
+.lesson-header {
+  margin-bottom: 3rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 2px solid var(--accent);
+}
+
+.lesson-header__eyebrow {
+  font-family: var(--sans);
+  font-size: .72rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 0 0 .8em;
+}
+
+.lesson-header__meta {
+  font-family: var(--sans);
+  font-size: .82rem;
+  color: var(--ink-soft);
+  margin: 1.2rem 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem 1.2rem;
+}
+
+.lesson-header__meta span { white-space: nowrap; }
+
+.lesson-header__lead {
+  font-size: 1.05rem;
+  color: var(--ink-soft);
+  margin-top: .8rem;
+}
+
+.lesson-footer {
+  margin-top: 4rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--rule);
+  font-family: var(--sans);
+  font-size: .88rem;
+  color: var(--ink-soft);
+}
+
+.lesson-nav {
+  display: flex; flex-wrap: wrap; gap: .5rem 1.5rem;
+  list-style: none; padding: 0; margin: 1.5rem 0 0;
+}
+.lesson-nav a { font-family: var(--sans); font-size: .85rem; }
+
+/* --- 提示框（callout） ---------------------------------------------------- */
+.callout {
+  margin: 1.75rem 0;
+  padding: 1rem 1.25rem;
+  border-left: 3px solid var(--rule);
+  background: var(--paper-alt);
+  border-radius: 0 3px 3px 0;
+  font-size: .95rem;
+}
+
+.callout > :last-child { margin-bottom: 0; }
+
+.callout__label {
+  display: block;
+  font-family: var(--sans);
+  font-size: .7rem;
+  font-weight: 700;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  margin-bottom: .45em;
+}
+
+.callout--why   { border-left-color: var(--link); }
+.callout--why   .callout__label { color: var(--link); }
+
+.callout--warn  { border-left-color: var(--bad); background: var(--bad-bg); }
+.callout--warn  .callout__label { color: var(--bad); }
+
+.callout--try   { border-left-color: var(--ok); }
+.callout--try   .callout__label { color: var(--ok); }
+
+.callout--source { border-left-color: var(--ink-faint); font-size: .88rem; }
+.callout--source .callout__label { color: var(--ink-faint); }
+
+/* --- 行内代码与代码块 ----------------------------------------------------- */
+code {
+  font-family: var(--mono);
+  font-size: .85em;
+  background: var(--paper-alt);
+  padding: .12em .38em;
+  border-radius: 3px;
+  border: 1px solid var(--rule);
+}
+
+pre {
+  margin: 0;
+  padding: 1rem 1.1rem;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: .8rem;
+  line-height: 1.65;
+  tab-size: 2;
+}
+
+pre code {
+  background: none; border: 0; padding: 0;
+  font-size: 1em; white-space: pre;
+}
+
+.codeblock {
+  margin: 1.5rem 0;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--paper-alt);
+  overflow: hidden;
+}
+
+.codeblock__title {
+  font-family: var(--sans);
+  font-size: .74rem;
+  letter-spacing: .05em;
+  color: var(--ink-soft);
+  padding: .45rem .9rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper);
+}
+
+/* 简易语法高亮（手工 span，不引入 highlight.js） */
+.tok-kw  { color: #a626a4; font-weight: 600; }
+.tok-str { color: #3f7d52; }
+.tok-com { color: var(--ink-faint); font-style: italic; }
+.tok-fn  { color: #2b6a8f; }
+.tok-num { color: #9c4221; }
+@media (prefers-color-scheme: dark) {
+  .tok-kw  { color: #d6a4de; }
+  .tok-str { color: #8ec49d; }
+  .tok-fn  { color: #7fb6d6; }
+  .tok-num { color: #e08a5f; }
+}
+
+/* --- 消息角色标记 --------------------------------------------------------- */
+.role {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .72rem;
+  font-weight: 600;
+  letter-spacing: .04em;
+  padding: .1em .5em;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  vertical-align: baseline;
+}
+.role--user      { color: var(--role-user); }
+.role--assistant { color: var(--role-assistant); }
+.role--tool      { color: var(--role-tool); }
+.role--system    { color: var(--role-system); }
+
+/* --- 流程条（flow）：展示 agent loop 的步骤 ------------------------------- */
+.flow {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: .5rem; margin: 1.5rem 0; padding: 0; list-style: none;
+  font-family: var(--sans); font-size: .82rem;
+}
+
+.flow li {
+  padding: .35rem .7rem;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--paper-alt);
+  white-space: nowrap;
+}
+
+.flow li::after {
+  content: "→";
+  color: var(--ink-faint);
+  margin-left: .7rem;
+  margin-right: -.55rem;
+}
+.flow li:last-child::after { content: none; }
+
+/* --- 卡片网格（用于并列概念） --------------------------------------------- */
+.cards {
+  display: grid; gap: 1rem; margin: 1.5rem 0;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+}
+.card {
+  border: 1px solid var(--rule);
+  border-top: 3px solid var(--accent);
+  border-radius: 0 0 4px 4px;
+  padding: .9rem 1rem;
+  background: var(--paper-alt);
+  font-size: .9rem;
+}
+.card h4 { margin: 0 0 .4rem; font-size: .95rem; }
+.card p:last-child { margin-bottom: 0; }
+
+/* --- 清单 ----------------------------------------------------------------- */
+.checklist { list-style: none; padding: 0; margin: 1.25rem 0; }
+.checklist li {
+  position: relative; padding-left: 1.9rem; margin-bottom: .6rem;
+  font-size: .95rem;
+}
+.checklist li::before {
+  content: "☐";
+  position: absolute; left: 0; top: -.1em;
+  color: var(--accent); font-size: 1.15em;
+}
+
+/* --- 表格 ----------------------------------------------------------------- */
+table {
+  width: 100%; border-collapse: collapse; margin: 1.5rem 0;
+  font-family: var(--sans); font-size: .86rem;
+}
+th, td { text-align: left; padding: .55rem .7rem; border-bottom: 1px solid var(--rule); }
+th { font-weight: 650; border-bottom: 1.5px solid var(--ink-faint); }
+tbody tr:last-child td { border-bottom: 0; }
+
+/* --- Quiz 组件（配合 assets/quiz.js） ------------------------------------- */
+.quiz {
+  margin: 1.75rem 0;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 1.2rem 1.25rem;
+  background: var(--paper-alt);
+}
+
+.quiz__question {
+  font-weight: 600;
+  margin: 0 0 1rem;
+  font-size: 1rem;
+}
+
+.quiz__question .quiz__index {
+  font-family: var(--sans); font-size: .75rem; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--accent);
+  display: block; margin-bottom: .35em;
+}
+
+.quiz__options { display: flex; flex-direction: column; gap: .5rem; }
+
+.quiz__option {
+  display: block; width: 100%; text-align: left;
+  font-family: var(--sans); font-size: .9rem; line-height: 1.5;
+  padding: .6rem .85rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+  transition: border-color .12s, background .12s, transform .06s;
+}
+.quiz__option:hover:not(:disabled) { border-color: var(--accent); }
+.quiz__option:active:not(:disabled) { transform: scale(.995); }
+.quiz__option:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.quiz__option:disabled { cursor: default; }
+
+.quiz__option.is-correct {
+  border-color: var(--ok); background: var(--ok-bg); color: var(--ok);
+  font-weight: 600;
+}
+.quiz__option.is-wrong {
+  border-color: var(--bad); background: var(--bad-bg); color: var(--bad);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+.quiz__option.is-wrong.is-shaking { animation: quiz-shake .3s; }
+
+@keyframes quiz-shake {
+  0%, 100% { transform: translateX(0); }
+  25%      { transform: translateX(-3px); }
+  75%      { transform: translateX(3px); }
+}
+
+.quiz__feedback {
+  margin-top: .9rem; font-size: .88rem; display: none;
+  padding-top: .9rem; border-top: 1px dashed var(--rule);
+}
+.quiz__feedback.is-shown { display: block; }
+.quiz__feedback .verdict { font-weight: 700; font-family: var(--sans); }
+.quiz__feedback.is-correct .verdict { color: var(--ok); }
+.quiz__feedback.is-wrong   .verdict { color: var(--bad); }
+
+.quiz__score {
+  font-family: var(--sans); font-size: .82rem; color: var(--ink-soft);
+  margin: 1.5rem 0 0; padding-top: 1rem; border-top: 1px solid var(--rule);
+}
+
+/* --- 自由回忆框（retrieval practice，无自动判分） ------------------------- */
+.recall {
+  margin: 1.75rem 0;
+  border: 1px dashed var(--accent);
+  border-radius: 4px;
+  padding: 1.1rem 1.25rem;
+  background: var(--paper-alt);
+}
+.recall__label {
+  font-family: var(--sans); font-size: .7rem; font-weight: 700;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--accent);
+}
+.recall ol { margin: .8rem 0 0; padding-left: 1.3rem; font-size: .95rem; }
+.recall details { margin-top: .9rem; font-size: .9rem; }
+.recall summary {
+  cursor: pointer; font-family: var(--sans); font-size: .85rem;
+  color: var(--link);
+}
+
+/* --- 引用来源 ------------------------------------------------------------- */
+.cite { font-size: .78rem; vertical-align: super; line-height: 0; }
+.cite a { text-decoration: none; }
+
+.sources { font-size: .85rem; padding-left: 1.3rem; }
+.sources li { margin-bottom: .5rem; }
+
+/* --- 印刷 ----------------------------------------------------------------- */
+@media print {
+  :root { --paper: #fff; --paper-alt: #f7f7f7; --ink: #000; }
+  body { padding: 0; font-size: 11pt; }
+  .lesson-nav, .quiz__option[disabled] { display: none; }
+  .quiz { page-break-inside: avoid; }
+  .codeblock, .callout, .card { page-break-inside: avoid; }
+  a { color: #000; text-decoration: none; }
+  a[href^="http"]::after { content: " (" attr(href) ")"; font-size: .75em; color: #555; }
+}
+
+/* --- 窄屏 ----------------------------------------------------------------- */
+@media (max-width: 34rem) {
+  body { padding: 2rem 1.1rem 5rem; font-size: 17px; }
+  h1 { font-size: 1.6rem; }
+  .flow { font-size: .78rem; }
+}
