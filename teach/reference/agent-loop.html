@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>速查 · Agent Loop 骨架</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <p class="lesson-header__eyebrow">速查表 · 参考文档</p>
+  <h1>Agent Loop 骨架</h1>
+  <p class="lesson-header__lead">
+    工具调用协议见 <a href="tool-call-protocol.html">上一份速查表</a>；这份讲<strong>循环本身</strong>：怎么停、出错往哪去、每一步为什么要这么写。
+    <br><span style="font-size:.85em;color:var(--ink-faint)">字段形状依据本机 <code>openai@7.32.0</code>；<code>finish_reason</code> 取值依据 DeepSeek 官方 API 文档。</span>
+  </p>
+</header>
+
+<main>
+
+<h2>骨架（带刹车与兜底）</h2>
+
+<div class="codeblock">
+  <div class="codeblock__title">TypeScript · run() 的完整形态</div>
+<pre><code><span class="tok-kw">const</span> messages: ChatCompletionMessageParam[] = [{ role: <span class="tok-str">'user'</span>, content: userMessage }]
+
+<span class="tok-kw">for</span> (<span class="tok-kw">let</span> step = <span class="tok-num">1</span>; step &lt;= MAX_STEPS; step++) {          <span class="tok-com">// ① 上界：兜底刹车</span>
+  <span class="tok-kw">const</span> res = <span class="tok-kw">await</span> openai.chat.completions.<span class="tok-fn">create</span>({ model, messages, tools })
+  <span class="tok-kw">const</span> msg = res.choices[<span class="tok-num">0</span>].message
+  messages.<span class="tok-fn">push</span>(msg)                                     <span class="tok-com">// ② 整个对象入历史，顺序不能乱</span>
+
+  <span class="tok-kw">const</span> calls = msg.tool_calls ?? []
+  <span class="tok-kw">if</span> (calls.length === <span class="tok-num">0</span>) <span class="tok-kw">return</span> msg.content ?? <span class="tok-str">''</span>       <span class="tok-com">// ③ 判据建在你能穷举的集合上</span>
+
+  <span class="tok-kw">for</span> (<span class="tok-kw">const</span> call <span class="tok-kw">of</span> calls) {
+    <span class="tok-kw">if</span> (call.type !== <span class="tok-str">'function'</span>) {                        <span class="tok-com">// ④ 联合类型收窄</span>
+      messages.<span class="tok-fn">push</span>({ role: <span class="tok-str">'tool'</span>, tool_call_id: call.id, content: <span class="tok-str">'不支持的类型'</span> })
+      <span class="tok-kw">continue</span>
+    }
+    <span class="tok-kw">const</span> content = <span class="tok-kw">await</span> <span class="tok-fn">executeSafely</span>(call.function.name, call.function.arguments)
+    messages.<span class="tok-fn">push</span>({ role: <span class="tok-str">'tool'</span>, tool_call_id: call.id, content })   <span class="tok-com">// ⑤ 每个 id 恰好回一条</span>
+  }
+}
+<span class="tok-com">// ⑥ 走到这里 = 撞上 MAX_STEPS，要大声报告，不要静默退出</span></code></pre>
+</div>
+
+<h2>三条不变式</h2>
+
+<table>
+  <thead><tr><th>#</th><th>不变式</th><th>违反的后果</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>②</td>
+      <td>assistant 消息<strong>整个对象</strong> push 进历史，不要手工挑字段重建</td>
+      <td>thinking 模式下丢掉 <code>reasoning_content</code> → 之后每一次请求都 400</td>
+    </tr>
+    <tr>
+      <td>⑤</td>
+      <td>进入历史的每一个 <code>tool_call.id</code>，在下一次请求前都收到<strong>恰好一条</strong> <code>tool</code> 消息</td>
+      <td>下一次请求 400，且报错信息<strong>不指向病因</strong>——病灶在上一轮的循环里</td>
+    </tr>
+    <tr>
+      <td>①</td>
+      <td>循环必须有<strong>独立于所有业务判断</strong>的上界</td>
+      <td>模型「每步都合规但一直在绕圈」时无限跑，烧的是你的 API 额度</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>停止判据：为什么不用 <code>finish_reason === 'stop'</code></h2>
+
+<p>官方文档给出的取值集合是 <strong>6 个</strong>：</p>
+
+<table>
+  <thead><tr><th>取值</th><th>官方释义</th><th>该停吗</th></tr></thead>
+  <tbody>
+    <tr><td><code>'stop'</code></td><td>命中自然停止点或你给的 stop 序列</td><td>停</td></tr>
+    <tr><td><code>'tool_calls'</code></td><td>模型调用了工具</td><td>继续</td></tr>
+    <tr><td><code>'length'</code></td><td>达到请求里指定的 <code>max_tokens</code> 上限</td><td>停（并按失败处理）</td></tr>
+    <tr><td><code>'content_filter'</code></td><td>内容因内容过滤器被省略</td><td>停</td></tr>
+    <tr><td><code>'insufficient_system_resource'</code></td><td>因推理系统资源不足，请求被中断</td><td>停</td></tr>
+    <tr><td><code>'aborted'</code></td><td>生成过程被中断</td><td>停</td></tr>
+  </tbody>
+</table>
+
+<div class="callout callout--warn">
+  <span class="callout__label">本地 SDK 的类型和它对不上</span>
+  <p><code>openai@7.32.0</code> 里 <code>finish_reason</code> 声明为 <code>'stop' | 'length' | 'tool_calls' | 'content_filter' | 'function_call'</code>——<strong>多了一个 DeepSeek 没有的 <code>'function_call'</code>，少了 <code>'insufficient_system_resource'</code> 和 <code>'aborted'</code></strong>。所以你写 <code>finishReason === 'aborted'</code> 会直接报 <code>TS2367</code>（no overlap）。</p>
+  <p style="margin-top:.6em">结论：<strong>对第三方 API 返回的枚举值，按运行时实际返回处理，不要按类型声明处理。</strong></p>
+</div>
+
+<div class="callout callout--why">
+  <span class="callout__label">判据建在你能穷举的集合上</span>
+  <p>不要问「<code>finish_reason</code> 是不是我认识的那几个值之一」（白名单，取值域在别人手里）；要问「<strong>模型这一轮有没有要求我干活</strong>」（<code>tool_calls</code> 有 / 没有，只有两种，在你手里）。</p>
+  <p style="margin-top:.6em">这样遇到任何意外取值，你<strong>默认停下</strong>——最坏的结果是少跑一轮，而不是烧一整晚额度。</p>
+</div>
+
+<h2>错误去向决策表</h2>
+
+<p>唯一的判据：<strong>这个错误，模型能不能自己修正？</strong></p>
+
+<table>
+  <thead><tr><th>来源</th><th>例子</th><th>去向</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>模型的错</td>
+      <td>工具名不存在、参数类型不对、缺必填字段、<code>arguments</code> 不是合法 JSON</td>
+      <td>作为 <code>tool</code> 消息的 <code>content</code> <strong>回传</strong></td>
+    </tr>
+    <tr>
+      <td>工具的业务错</td>
+      <td>订单不存在、除数为 0、文件格式不对</td>
+      <td>同上（除非你刻意要区分）</td>
+    </tr>
+    <tr>
+      <td>环境的错</td>
+      <td>网络断、API key 失效、磁盘满、数据库连不上</td>
+      <td><strong>向上抛，终止运行</strong>。回传只会让模型徒劳重试</td>
+    </tr>
+    <tr>
+      <td>达到 <code>MAX_STEPS</code></td>
+      <td>模型合规地绕圈，或被截断后空转</td>
+      <td><code>console.warn</code> 明确报告。<strong>不要静默 break</strong></td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout callout--try">
+  <span class="callout__label">一句话</span>
+  <p><strong>「跳过」不是错误处理，「回一条说明」才是。</strong>错误是给<strong>模型</strong>看的信息（能修正的），不是给你看的异常。回一条说明的额外收益：模型会读到它并自己改主意——这就是 agent 自我修正的入口。</p>
+</div>
+
+<h2>症状 → 病因</h2>
+
+<table>
+  <thead><tr><th>你看到的现象</th><th>真正的病因</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>下一轮请求 400，说 tool_calls 没有对应的 tool 响应</td>
+      <td>某个 <code>tool_call</code> 被 <code>continue</code> / 条件判断跳过了，没回 tool 消息</td>
+    </tr>
+    <tr>
+      <td>程序「卡住」很久，最后打印超过 X 轮</td>
+      <td>停止判据是白名单（<code>finish_reason === 'stop'</code>），遇到别的取值时空转</td>
+    </tr>
+    <tr>
+      <td>日志里只有「达到最大步数」这一行</td>
+      <td>同上；而且循环体里没有日志，你只能看到结果看不到过程</td>
+    </tr>
+    <tr>
+      <td>结果看起来像模像样，但事实上是错的</td>
+      <td>工具返回了 <code>Infinity</code> / <code>NaN</code> / <code>undefined</code> / <code>[object Object]</code>，模型照单全收或自己圆了过去</td>
+    </tr>
+    <tr>
+      <td>程序在工具报错处直接崩掉</td>
+      <td><code>JSON.parse</code> 或 <code>tool.execute</code> 抛出的异常没人接</td>
+    </tr>
+    <tr>
+      <td>开了 thinking 之后整个会话持续 400</td>
+      <td>重放历史时手工重建了 assistant 消息，把 <code>reasoning_content</code> 丢了</td>
+    </tr>
+  </tbody>
+</table>
+
+<p style="font-size:.9em;color:var(--ink-soft)">带 <code>✓</code> / <code>✗</code> 与 <code>[step N]</code> 的日志不是装饰——<strong>agent 的调试几乎全发生在日志里</strong>，因为你无法单步跟进一个 HTTP 请求。</p>
+
+</main>
+
+<footer class="lesson-footer">
+  <ul class="lesson-nav">
+    <li><a href="../lessons/0002-loop-guardrails.html">第 2 课 · 给循环装上刹车与兜底</a></li>
+    <li><a href="tool-call-protocol.html">速查 · Tool Call 消息协议</a></li>
+    <li><a href="../lessons/0001-tool-call-roundtrip.html">第 1 课 · 工具调用的完整往返</a></li>
+    <li><a href="../../notes/">你的笔记</a></li>
+  </ul>
+</footer>
+
+</body>
+</html>
