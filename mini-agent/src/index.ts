@@ -1,3 +1,5 @@
 import { run } from './agent'
 
-run()
+run().then(answer => {
+  console.log('Final answer:', answer)
+})
