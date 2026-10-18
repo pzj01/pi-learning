@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "types": ["@types/node"],
+    "types": ["@types/node"]
   },
   "include": ["src/**/*.ts", "shim.d.ts"]
 }
