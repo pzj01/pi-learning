@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 3 课 · 把模型变成可替换的零件</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<header class="lesson-header">
+  <p class="lesson-header__eyebrow">AI Agent 开发 · 第 3 课</p>
+  <h1>把模型变成可替换的零件</h1>
+  <p class="lesson-header__lead">
+    第 2 课结尾我预告了「可注入的模型依赖 + 测试」。这一课把它做完：
+    让 <code>run()</code> 不再绑死 OpenAI client，然后用 <strong>6 个几毫秒跑完的测试</strong>，
+    把你之前只能靠真模型碰运气触发的分支，一个一个钉死。
+  </p>
+  <p class="lesson-header__meta">
+    <span>⏱ 约 55 分钟</span>
+    <span>🎯 ROADMAP 阶段 1「用日志或测试确认执行顺序」+ 阶段 2「测试策略」</span>
+    <span>🔧 改 <code>agent.ts</code> / <code>index.ts</code> / <code>package.json</code>，新增 <code>agent.test.ts</code></span>
+  </p>
+</header>
+
+<main>
+
+<h2><span class="num">1</span>这一课要赢下什么</h2>
+
+<p>先说你跑完会得到什么：</p>
+
+<div class="callout callout--try">
+  <span class="callout__label">本节课的小胜利</span>
+  <p><strong>6 个测试全绿，不联网、不花 API 额度，甚至不需要 <code>DEEPSEEK_API_KEY</code>。</strong>而且它们覆盖的正是你之前最难受的几件事：</p>
+  <ol style="margin:.6em 0 0;padding-left:1.3em">
+    <li>模型直接回答 → 一轮就停</li>
+    <li>模型调用工具 → 第二轮请求里的历史<strong>角色、顺序、<code>tool_call_id</code> 全部正确</strong></li>
+    <li>模型请求不存在的工具 → 账照样平</li>
+    <li>工具参数是坏 JSON → 进程不崩</li>
+    <li>模型一直要求干活 → 恰好停在 <code>maxTurns</code></li>
+    <li><code>finish_reason</code> 是个没见过的值且没有工具调用 → 立即停</li>
+  </ol>
+  <p style="margin-top:.6em">全部跑完，用时不到 0.3 秒。</p>
+</div>
+
+<p>第 2 课的实验 B 和 D 有个共同点：<strong>为了制造一个分支，你得改生产代码</strong>（假装工具不存在、临时改回白名单判停）。实验 C 更麻烦——模型每次的反应都不一样。测试要解决的，就是这种「场景能描述、却没法稳定复现」的窘境。</p>
+
+<p>第 2 课的四个实验如果你还没跑完，<strong>不影响这一课</strong>。其中 B、D 两个场景，这一课会用测试确定性地重建出来；C 里「模型面对工具失败会怎么回答」仍然只有真模型能告诉你。</p>
+
+<h2><span class="num">2</span>为什么你之前「测不了」</h2>
+
+<p>先看你现在 <code>run()</code> 开头的几行：</p>
+
+<div class="codeblock">
+  <div class="codeblock__title">mini-agent/src/agent.ts（现有代码，节选）</div>
+<pre><code><span class="tok-kw">export const</span> openai = <span class="tok-kw">new</span> <span class="tok-fn">OpenAI</span>({
+  apiKey: process.env.DEEPSEEK_API_KEY,
+  baseURL: process.env.DEEPSEEK_API_BASE,
+})
+
+<span class="tok-kw">export async function</span> <span class="tok-fn">run</span>() {
+  <span class="tok-kw">const</span> context: ChatCompletionCreateParamsNonStreaming = {
+    messages: [{ role: <span class="tok-str">'user'</span>, content: <span class="tok-str">'请计算 1500 除以 3'</span> }],
+    <span class="tok-com">// …</span>
+  }
+
+  <span class="tok-kw">const</span> completion = <span class="tok-kw">await</span> openai.chat.completions.<span class="tok-fn">create</span>(context)</code></pre>
+</div>
+
+<p>这段代码把三样东西<strong>焊死</strong>在 <code>run()</code> 里了：</p>
+
+<div class="cards">
+  <div class="card">
+    <p><strong>输入</strong></p>
+    <p>用户消息写死在函数体里。想测「未知工具」得先改代码。</p>
+  </div>
+  <div class="card">
+    <p><strong>模型</strong></p>
+    <p><code>run()</code> 直接引用模块级的 <code>openai</code>。想让它返回预设响应，只能 mock 整个模块。</p>
+  </div>
+  <div class="card">
+    <p><strong>凭据</strong></p>
+    <p><code>new OpenAI()</code> 在模块加载时就会校验 key。测试文件只要 <code>import</code> 它，没有 key 就直接崩。</p>
+  </div>
+</div>
+
+<p>所以问题不是「缺一个测试框架」。<strong>缺的是接缝</strong>（seam）——一个允许你在测试时把「真模型」换成「假模型」的地方。</p>
+
+<div class="callout callout--why">
+  <span class="callout__label">这一课真正要记住的一句话</span>
+  <p><strong>可测试性不是测试文件带来的，是生产代码的依赖边界带来的。</strong></p>
+  <p style="margin-top:.6em">如果一个函数内部直接 <code>new</code> 了外部资源、直接读了全局配置、直接把结果 <code>console.log</code> 出去，那么你写再多的测试文件也只能绕着它走。改法不是「加 mock」，而是<strong>把这些东西从函数内部挪到参数列表上</strong>。</p>
+</div>
+
+<h2><span class="num">3</span>依赖注入：本质就是「多一个参数」</h2>
+
+<p>「依赖注入」（dependency injection）听起来像框架术语，但在这个项目里，它就是一个默认参数：</p>
+
+<div class="codeblock">
+<pre><code><span class="tok-kw">export async function</span> <span class="tok-fn">run</span>(
+  userMessage: <span class="tok-kw">string</span>,
+  options: {
+    model?: ChatModel      <span class="tok-com">// 生产环境不传，用真模型</span>
+    maxTurns?: <span class="tok-kw">number</span>
+  } = {},
+): Promise&lt;<span class="tok-kw">string</span>&gt;</code></pre>
+</div>
+
+<p>其中 <code>ChatModel</code> 是我们自己定义的一个<strong>窄接口</strong>——只描述 <code>run()</code> 真正需要模型做的那一件事：</p>
+
+<div class="codeblock">
+<pre><code><span class="tok-kw">export interface</span> ChatModel {
+  create: (params: ChatCompletionCreateParamsNonStreaming) =&gt; Promise&lt;{ choices: DeepseekChoice[] }&gt;
+}</code></pre>
+</div>
+
+<p>为什么是「窄」接口？因为如果直接要求一个完整的 <code>OpenAI</code> 类型，测试里的 fake 就得伪造 <code>chat</code>、<code>completions</code>、<code>create</code>、<code>stream</code> 一大堆用不到的东西。<strong>接口越窄，替换成本越低，测试越容易写。</strong></p>
+
+<p>TypeScript 是结构化类型：真 client 和 fake 只要<strong>形状对得上</strong>，就能互相替换，不需要继承或注册。</p>
+
+<div class="callout callout--why">
+  <span class="callout__label">为什么不用「mock 整个 openai 模块」</span>
+  <p>你当然可以在测试里写 <code>vi.mock('openai')</code> 之类的东西。但它有三个问题：</p>
+  <ul style="margin:.5em 0 0;padding-left:1.3em">
+    <li><strong>隐式</strong>：测试是否生效取决于模块路径和加载顺序，读代码看不出来。</li>
+    <li><strong>易碎</strong>：改一下 <code>import</code> 的路径，mock 可能悄悄失效。</li>
+    <li><strong>没有类型保护</strong>：fake 写错字段，编译器不会帮你。</li>
+  </ul>
+  <p style="margin-top:.6em">把 model 做成参数以后，<strong>替换发生在明面上</strong>：调用 <code>run(..., { model: fake })</code> 的人一眼就能看到。这就是为什么依赖注入比模块 mock 更值得学——它不是测试技巧，是设计。</p>
+</div>
+
+<h2><span class="num">4</span>一个必须先解决的坑：模块加载就要 key</h2>
+
+<p>改 <code>run()</code> 之前，还有一个隐藏依赖。你现在的代码在<strong>模块顶层</strong>创建 client：</p>
+
+<div class="codeblock"><pre><code><span class="tok-kw">export const</span> openai = <span class="tok-kw">new</span> <span class="tok-fn">OpenAI</span>({ apiKey: process.env.DEEPSEEK_API_KEY, … })</code></pre></div>
+
+<p>我实测过：<strong>没有 <code>DEEPSEEK_API_KEY</code> / <code>OPENAI_API_KEY</code> 时，</strong>这一行会直接抛错——</p>
+
+<div class="codeblock">
+  <div class="codeblock__title">本机实际输出</div>
+<pre><code>construct throws: Missing credentials. Please pass an `apiKey`, `workloadIdentity`,
+`adminAPIKey`, or set the `OPENAI_API_KEY` or `OPENAI_ADMIN_KEY` environment variable.</code></pre>
+</div>
+
+<p>也就是说：测试文件只要 <code>import { run } from './agent'</code>，测试还没开始就已经失败了。这不是测试写得不对，是 client 创建得太早。</p>
+
+<p>修法是把 client 变成<strong>懒加载</strong>——第一次真正要请求模型时才创建：</p>
+
+<div class="codeblock">
+<pre><code><span class="tok-kw">let</span> client: OpenAI | <span class="tok-kw">undefined</span>
+<span class="tok-kw">function</span> <span class="tok-fn">getClient</span>(): OpenAI {
+  client ??= <span class="tok-kw">new</span> <span class="tok-fn">OpenAI</span>({
+    apiKey: process.env.DEEPSEEK_API_KEY,
+    baseURL: process.env.DEEPSEEK_API_BASE,
+  })
+  <span class="tok-kw">return</span> client
+}</code></pre>
+</div>
+
+<p>这样：<strong>真实运行时行为不变</strong>（第一次调用仍然会用你的 key），但测试进程可以完整加载模块、跑完全部 fake 测试，<strong>一次都不碰 key</strong>。这条我实测过——把两个环境变量都 unset，6 个测试照样全绿。</p>
+
+<h2><span class="num">5</span>动手 ①：改造 <code>agent.ts</code></h2>
+
+<p>整份文件替换成下面这样。前三段（<code>Executable</code> 那些）不在这里，它们在 <code>tool.ts</code> 里，<strong>不需要动</strong>。</p>
+
+<div class="codeblock">
+  <div class="codeblock__title">mini-agent/src/agent.ts · 完整替换</div>
+<pre><code><span class="tok-kw">import type</span> {
+  ChatCompletionCreateParamsNonStreaming,
+  ChatCompletionMessageToolCall,
+  ChatCompletionToolMessageParam,
+  DeepseekChoice,
+} <span class="tok-kw">from</span> <span class="tok-str">'openai/resources/chat/completions'</span>
+<span class="tok-kw">import</span> process <span class="tok-kw">from</span> <span class="tok-str">'node:process'</span>
+<span class="tok-kw">import</span> { OpenAI } <span class="tok-kw">from</span> <span class="tok-str">'openai'</span>
+<span class="tok-kw">import</span> logger <span class="tok-kw">from</span> <span class="tok-str">'./log'</span>
+<span class="tok-kw">import</span> { executeTool, tools } <span class="tok-kw">from</span> <span class="tok-str">'./tool'</span>
+<span class="tok-kw">import</span> <span class="tok-str">'dotenv/config'</span>
+
+<span class="tok-kw">const</span> MAX_TURNS = <span class="tok-num">8</span>
+
+<span class="tok-com">/**
+ * run() 对模型的全部要求：拿到请求参数，返回若干条 choice。
+ * 接口故意收窄 —— 测试里的 fake 只要能返回 choices，不需要伪造整个 ChatCompletion。
+ */</span>
+<span class="tok-kw">export interface</span> ChatModel {
+  create: (params: ChatCompletionCreateParamsNonStreaming) =&gt; Promise&lt;{ choices: DeepseekChoice[] }&gt;
+}
+
+<span class="tok-com">// 懒加载：模块被 import 时不校验 key，只有真的请求模型时才创建 client。
+// 否则测试文件只要 import agent.ts 就会因为缺少 API key 崩溃。</span>
+<span class="tok-kw">let</span> client: OpenAI | <span class="tok-kw">undefined</span>
+<span class="tok-kw">function</span> <span class="tok-fn">getClient</span>(): OpenAI {
+  client ??= <span class="tok-kw">new</span> <span class="tok-fn">OpenAI</span>({
+    apiKey: process.env.DEEPSEEK_API_KEY,
+    baseURL: process.env.DEEPSEEK_API_BASE,
+  })
+  <span class="tok-kw">return</span> client
+}
+
+<span class="tok-com">// SDK 的类型描述的是 OpenAI 的 finish_reason 形状，和 DeepSeek 对不上；
+// 这层 adapter 把类型谎言收敛到一行，run() 内部只面对 DeepseekChoice。</span>
+<span class="tok-kw">const</span> deepseek: ChatModel = {
+  create: <span class="tok-kw">async</span> params =&gt;
+    <span class="tok-kw">await</span> <span class="tok-fn">getClient</span>().chat.completions.<span class="tok-fn">create</span>(params) <span class="tok-kw">as unknown as</span> { choices: DeepseekChoice[] },
+}
+
+<span class="tok-kw">export interface</span> RunOptions {
+  model?: ChatModel
+  maxTurns?: <span class="tok-kw">number</span>
+}
+
+<span class="tok-kw">export async function</span> <span class="tok-fn">run</span>(userMessage: <span class="tok-kw">string</span>, options: RunOptions = {}): Promise&lt;<span class="tok-kw">string</span>&gt; {
+  <span class="tok-kw">const</span> { model = deepseek, maxTurns = MAX_TURNS } = options
+
+  <span class="tok-kw">const</span> context: ChatCompletionCreateParamsNonStreaming = {
+    <span class="tok-com">// 上下文消息列表，包含用户输入和助手的回复</span>
+    messages: [
+      {
+        role: <span class="tok-str">'user'</span>,
+        content: userMessage,
+      },
+    ],
+    model: <span class="tok-str">'deepseek-flash'</span>,
+    reasoning_effort: <span class="tok-str">'high'</span>,
+    tool_choice: <span class="tok-str">'auto'</span>,
+    stream: <span class="tok-kw">false</span>,
+    tools,
+  }
+
+  logger.<span class="tok-fn">setup</span>(context)
+
+  <span class="tok-com">// agent loop</span>
+  <span class="tok-kw">for</span> (<span class="tok-kw">let</span> turn = <span class="tok-num">1</span>; turn &lt;= maxTurns; turn++) {
+    <span class="tok-kw">try</span> {
+      <span class="tok-kw">const</span> completion = <span class="tok-kw">await</span> model.<span class="tok-fn">create</span>(context)
+      <span class="tok-kw">const</span> { message, finish_reason } = completion.choices[<span class="tok-num">0</span>]
+
+      <span class="tok-com">// 先把 assistant 消息原样放进历史，再执行工具：协议账目先记上</span>
+      context.messages.<span class="tok-fn">push</span>(message)
+
+      <span class="tok-kw">const</span> toolCalls = message.tool_calls ?? []
+
+      <span class="tok-com">// 判据：模型这一轮有没有要求我干活。</span>
+      <span class="tok-com">// 不用 finish_reason 白名单判停 —— 它的取值域由服务器决定，穷举不完。</span>
+      <span class="tok-kw">if</span> (toolCalls.length === <span class="tok-num">0</span>) {
+        logger.<span class="tok-fn">finish</span>(finish_reason)
+        <span class="tok-kw">return</span> message.content ?? <span class="tok-str">''</span>
+      }
+
+      <span class="tok-kw">for</span> (<span class="tok-kw">const</span> toolCall <span class="tok-kw">of</span> toolCalls) {
+        logger.<span class="tok-fn">tool</span>(toolCall)
+        context.messages.<span class="tok-fn">push</span>(<span class="tok-kw">await</span> <span class="tok-fn">toToolMessage</span>(toolCall))
+      }
+    }
+    <span class="tok-kw">catch</span> (error) {
+      logger.<span class="tok-fn">error</span>(error <span class="tok-kw">as</span> Error)
+      <span class="tok-kw">throw</span> error
+    }
+  }
+
+  logger.<span class="tok-fn">error</span>(<span class="tok-str">`Max turns reached (${maxTurns})`</span>)
+  <span class="tok-kw">return</span> <span class="tok-str">''</span>
+}
+
+<span class="tok-com">/**
+ * 把一次工具调用变成一条 tool 消息。
+ * 无论成功失败都返回一条，保证每个 tool_call_id 的账都是平的。
+ */</span>
+<span class="tok-kw">async function</span> <span class="tok-fn">toToolMessage</span>(toolCall: ChatCompletionMessageToolCall): Promise&lt;ChatCompletionToolMessageParam&gt; {
+  <span class="tok-kw">const</span> result = <span class="tok-kw">await</span> <span class="tok-fn">executeTool</span>(toolCall)
+  <span class="tok-kw">return</span> {
+    role: <span class="tok-str">'tool'</span>,
+    tool_call_id: toolCall.id,
+    content: result.ok ? result.content : <span class="tok-str">`Error executing tool: ${result.error.message}`</span>,
+  }
+}</code></pre>
+</div>
+
+<p>改动与理由：</p>
+
+<table>
+  <thead><tr><th>改动</th><th>为什么</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>run()</code> 接收 <code>userMessage</code></td>
+      <td>输入从函数体里挪出来，测试才能构造任意场景</td>
+    </tr>
+    <tr>
+      <td>模型通过 <code>options.model</code> 注入，默认 <code>deepseek</code></td>
+      <td>生产调用保持不变，测试可以塞 fake</td>
+    </tr>
+    <tr>
+      <td><code>new OpenAI()</code> 改成懒加载 <code>getClient()</code></td>
+      <td>没有 key 也能 import 模块；<strong>这是测试能跑的前提</strong></td>
+    </tr>
+    <tr>
+      <td>停止判据改成 <code>toolCalls.length === 0</code></td>
+      <td>第 2 课的核心结论：判据要建在你能穷举的集合上</td>
+    </tr>
+    <tr>
+      <td>抽出一个 <code>toToolMessage()</code></td>
+      <td>「账要平」这件事只有一个实现点，测试也只需要盯这一处</td>
+    </tr>
+    <tr>
+      <td>两个出口都返回 <code>string</code></td>
+      <td>把隐式契约（可能返回 <code>undefined</code>）变成显式契约，测试才好断言</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout callout--warn">
+  <span class="callout__label">我注意到你保留了 <code>finish_reason</code> 白名单</span>
+  <p>你现在的停止分支是 <code>finish_reason === 'stop' || 'length' || …</code>，除了 <code>'tool_calls'</code>，文档里的另外五个值都列进去了。但第 2 课说过：<strong>白名单的假设是「我已经穷举了所有取值」，而取值域由服务器决定。</strong>如果哪天多出第七个值、且这一轮没有 <code>tool_calls</code>，你的循环会空转到 <code>MAX_TURNS</code>。</p>
+  <p style="margin-top:.6em">新代码把判据换成 <code>toolCalls.length === 0</code> 后，<strong>未知值只会让你少跑一轮，不会让你空转八轮</strong>。而 <code>finish_reason</code> 仍然保留——它现在是「报告停止原因」的信息，不再是「决定是否停止」的开关。第 6 节最后一个测试专门守这条。</p>
+</div>
+
+<h3><code>index.ts</code> 跟着改一行</h3>
+
+<div class="codeblock">
+  <div class="codeblock__title">mini-agent/src/index.ts</div>
+<pre><code><span class="tok-kw">import</span> { run } <span class="tok-kw">from</span> <span class="tok-str">'./agent'</span>
+
+<span class="tok-com">// 别让异常裸奔：网络抖动、key 失效这类环境错误会从 run() 里抛出来</span>
+<span class="tok-fn">run</span>(<span class="tok-str">'请计算 1500 除以 3'</span>)
+  .<span class="tok-fn">then</span>(answer =&gt; console.<span class="tok-fn">warn</span>(<span class="tok-str">'最终回答：'</span>, answer))
+  .<span class="tok-fn">catch</span>(console.error)</code></pre>
+</div>
+
+<p>注意这里是 <code>console.warn</code> 而不是 <code>console.log</code>：你项目里的 antfu ESLint 规则只允许 <code>warn</code> / <code>error</code>。想用 <code>log</code> 就改规则，但别为了绕 lint 而绕。</p>
+
+<h2><span class="num">6</span>动手 ②：写测试</h2>
+
+<p>测试框架的选择先交代清楚：<strong>这一课用 Node 内置的 <code>node:test</code>，不装 vitest。</strong></p>
+
+<div class="callout callout--why">
+  <span class="callout__label">为什么不用 vitest</span>
+  <p>你现在需要的是「跑几个纯函数测试」，<code>node:test</code> 已经够了，而且：</p>
+  <ul style="margin:.5em 0 0;padding-left:1.3em">
+    <li><strong>零新增依赖</strong>：项目里已经有 <code>tsx</code>，直接 <code>tsx --test</code> 就能跑 TypeScript。</li>
+    <li>不用额外配置 <code>vitest.config.ts</code>，不用处理 DOM、watch、覆盖率这些你暂时用不到的东西。</li>
+  </ul>
+  <p style="margin-top:.6em">什么时候该换？当你开始需要 watch 模式、更丰富的 mock API、覆盖率报告或 UI 时，再引入 vitest 不迟。到那时，这一课的测试几乎可以原样迁移——<code>test / assert</code> 的形状是相通的。</p>
+  <p style="margin-top:.6em"><strong>代价：</strong>antfu 的 ESLint 配置默认假设你用 vitest，会报 <code>test/no-import-node-test</code>。测试文件顶部加一行带原因的禁用注释即可（下面代码里有）。</p>
+</div>
+
+<p>新建 <code>mini-agent/src/agent.test.ts</code>：</p>
+
+<div class="codeblock">
+  <div class="codeblock__title">mini-agent/src/agent.test.ts</div>
+<pre><code><span class="tok-kw">import type</span> {
+  ChatCompletionCreateParamsNonStreaming,
+  ChatCompletionMessage,
+  ChatCompletionMessageToolCall,
+  ChatCompletionToolMessageParam,
+  DeepseekChoice,
+} <span class="tok-kw">from</span> <span class="tok-str">'openai/resources/chat/completions'</span>
+<span class="tok-kw">import type</span> { ChatModel } <span class="tok-kw">from</span> <span class="tok-str">'./agent'</span>
+<span class="tok-kw">import</span> assert <span class="tok-kw">from</span> <span class="tok-str">'node:assert/strict'</span>
+<span class="tok-com">// eslint-disable-next-line test/no-import-node-test -- 刻意选零依赖的 Node 内置 runner，不引入 vitest</span>
+<span class="tok-kw">import</span> { test } <span class="tok-kw">from</span> <span class="tok-str">'node:test'</span>
+<span class="tok-kw">import</span> { run } <span class="tok-kw">from</span> <span class="tok-str">'./agent'</span>
+
+<span class="tok-com">/** 造一条 assistant 回复。finish_reason 必填，其余字段按需覆盖。 */</span>
+<span class="tok-kw">function</span> <span class="tok-fn">reply</span>(finishReason: DeepseekChoice[<span class="tok-str">'finish_reason'</span>], message: Partial&lt;ChatCompletionMessage&gt; = {}): DeepseekChoice {
+  <span class="tok-kw">return</span> {
+    index: <span class="tok-num">0</span>,
+    logprobs: <span class="tok-kw">null</span>,
+    finish_reason: finishReason,
+    message: { role: <span class="tok-str">'assistant'</span>, content: <span class="tok-kw">null</span>, refusal: <span class="tok-kw">null</span>, ...message } <span class="tok-kw">as</span> ChatCompletionMessage,
+  }
+}
+
+<span class="tok-com">/** 造一次工具调用。rawArguments 用来模拟模型给出的坏 JSON。 */</span>
+<span class="tok-kw">function</span> <span class="tok-fn">toolCall</span>(name: <span class="tok-kw">string</span>, rawArguments: <span class="tok-kw">string</span>, id = <span class="tok-str">'call_1'</span>): ChatCompletionMessageToolCall {
+  <span class="tok-kw">return</span> {
+    id,
+    type: <span class="tok-str">'function'</span>,
+    function: { name, arguments: rawArguments },
+  }
+}
+
+<span class="tok-kw">interface</span> FakeModel <span class="tok-kw">extends</span> ChatModel {
+  calls: ChatCompletionCreateParamsNonStreaming[]
+}
+
+<span class="tok-com">/**
+ * 按顺序吐出预先写好的响应，并记录每次请求的参数。
+ * 注意记录时只深拷贝 messages：params.tools 里带着 execute 函数，
+ * structuredClone 整个对象会抛 DataCloneError。
+ */</span>
+<span class="tok-kw">function</span> <span class="tok-fn">fakeModel</span>(...responses: DeepseekChoice[]): FakeModel {
+  <span class="tok-kw">const</span> calls: ChatCompletionCreateParamsNonStreaming[] = []
+  <span class="tok-kw">return</span> {
+    calls,
+    <span class="tok-kw">async</span> <span class="tok-fn">create</span>(params) {
+      calls.<span class="tok-fn">push</span>({ ...params, messages: <span class="tok-fn">structuredClone</span>(params.messages) })
+      <span class="tok-kw">const</span> response = responses.<span class="tok-fn">shift</span>()
+      <span class="tok-kw">if</span> (!response)
+        <span class="tok-kw">throw new</span> <span class="tok-fn">Error</span>(<span class="tok-str">'fake model 没有更多响应了'</span>)
+      <span class="tok-kw">return</span> { choices: [response] }
+    },
+  }
+}
+
+<span class="tok-fn">test</span>(<span class="tok-str">'模型直接回答：一次请求后停止'</span>, <span class="tok-kw">async</span> () =&gt; {
+  <span class="tok-kw">const</span> model = <span class="tok-fn">fakeModel</span>(<span class="tok-fn">reply</span>(<span class="tok-str">'stop'</span>, { content: <span class="tok-str">'你好'</span> }))
+
+  <span class="tok-kw">const</span> answer = <span class="tok-kw">await</span> <span class="tok-fn">run</span>(<span class="tok-str">'打个招呼'</span>, { model })
+
+  assert.<span class="tok-fn">equal</span>(answer, <span class="tok-str">'你好'</span>)
+  assert.<span class="tok-fn">equal</span>(model.calls.length, <span class="tok-num">1</span>)
+  assert.<span class="tok-fn">deepEqual</span>(model.calls[<span class="tok-num">0</span>].messages, [{ role: <span class="tok-str">'user'</span>, content: <span class="tok-str">'打个招呼'</span> }])
+})
+
+<span class="tok-fn">test</span>(<span class="tok-str">'一次工具调用：第二轮历史里 tool 消息与 tool_call_id 对上'</span>, <span class="tok-kw">async</span> () =&gt; {
+  <span class="tok-kw">const</span> model = <span class="tok-fn">fakeModel</span>(
+    <span class="tok-fn">reply</span>(<span class="tok-str">'tool_calls'</span>, {
+      tool_calls: [<span class="tok-fn">toolCall</span>(<span class="tok-str">'calculator'</span>, <span class="tok-str">'{"operation":"add","a":2,"b":3}'</span>)],
+    }),
+    <span class="tok-fn">reply</span>(<span class="tok-str">'stop'</span>, { content: <span class="tok-str">'结果是 5'</span> }),
+  )
+
+  <span class="tok-kw">const</span> answer = <span class="tok-kw">await</span> <span class="tok-fn">run</span>(<span class="tok-str">'2 + 3 等于几'</span>, { model })
+
+  assert.<span class="tok-fn">equal</span>(answer, <span class="tok-str">'结果是 5'</span>)
+  assert.<span class="tok-fn">equal</span>(model.calls.length, <span class="tok-num">2</span>)
+
+  <span class="tok-com">// 第二轮请求发出去时，模型必须能看到 user → assistant(tool_calls) → tool 三段</span>
+  <span class="tok-kw">const</span> history = model.calls[<span class="tok-num">1</span>].messages
+  assert.<span class="tok-fn">equal</span>(history.length, <span class="tok-num">3</span>)
+  assert.<span class="tok-fn">equal</span>(history[<span class="tok-num">1</span>].role, <span class="tok-str">'assistant'</span>)
+
+  <span class="tok-kw">const</span> toolMessage = history[<span class="tok-num">2</span>] <span class="tok-kw">as</span> ChatCompletionToolMessageParam
+  assert.<span class="tok-fn">equal</span>(toolMessage.role, <span class="tok-str">'tool'</span>)
+  assert.<span class="tok-fn">equal</span>(toolMessage.tool_call_id, <span class="tok-str">'call_1'</span>)
+  assert.<span class="tok-fn">equal</span>(toolMessage.content, <span class="tok-str">'5'</span>)
+})
+
+<span class="tok-fn">test</span>(<span class="tok-str">'未知工具：回一条说明，而不是跳过'</span>, <span class="tok-kw">async</span> () =&gt; {
+  <span class="tok-kw">const</span> model = <span class="tok-fn">fakeModel</span>(
+    <span class="tok-fn">reply</span>(<span class="tok-str">'tool_calls'</span>, {
+      tool_calls: [<span class="tok-fn">toolCall</span>(<span class="tok-str">'get_weather'</span>, <span class="tok-str">'{"city":"北京"}'</span>)],
+    }),
+    <span class="tok-fn">reply</span>(<span class="tok-str">'stop'</span>, { content: <span class="tok-str">'我没有天气工具'</span> }),
+  )
+
+  <span class="tok-kw">await</span> <span class="tok-fn">run</span>(<span class="tok-str">'明天北京天气'</span>, { model })
+
+  <span class="tok-kw">const</span> history = model.calls[<span class="tok-num">1</span>].messages
+  <span class="tok-kw">const</span> toolMessage = history[<span class="tok-num">2</span>] <span class="tok-kw">as</span> ChatCompletionToolMessageParam
+  assert.<span class="tok-fn">equal</span>(history.length, <span class="tok-num">3</span>, <span class="tok-str">'悬空的 tool_call 会让账不平'</span>)
+  assert.<span class="tok-fn">equal</span>(toolMessage.tool_call_id, <span class="tok-str">'call_1'</span>)
+  assert.<span class="tok-fn">match</span>(<span class="tok-fn">String</span>(toolMessage.content), <span class="tok-str">/Tool not found/</span>)
+})
+
+<span class="tok-fn">test</span>(<span class="tok-str">'工具参数不是合法 JSON：错误变成 tool 消息，进程不崩'</span>, <span class="tok-kw">async</span> () =&gt; {
+  <span class="tok-kw">const</span> model = <span class="tok-fn">fakeModel</span>(
+    <span class="tok-fn">reply</span>(<span class="tok-str">'tool_calls'</span>, {
+      tool_calls: [<span class="tok-fn">toolCall</span>(<span class="tok-str">'calculator'</span>, <span class="tok-str">'{not json'</span>)],
+    }),
+    <span class="tok-fn">reply</span>(<span class="tok-str">'stop'</span>, { content: <span class="tok-str">'参数格式不对，我再试一次'</span> }),
+  )
+
+  <span class="tok-kw">const</span> answer = <span class="tok-kw">await</span> <span class="tok-fn">run</span>(<span class="tok-str">'算一下'</span>, { model })
+
+  assert.<span class="tok-fn">equal</span>(answer, <span class="tok-str">'参数格式不对，我再试一次'</span>)
+  <span class="tok-kw">const</span> toolMessage = model.calls[<span class="tok-num">1</span>].messages[<span class="tok-num">2</span>] <span class="tok-kw">as</span> ChatCompletionToolMessageParam
+  assert.<span class="tok-fn">match</span>(<span class="tok-fn">String</span>(toolMessage.content), <span class="tok-str">/Invalid tool call arguments/</span>)
+})
+
+<span class="tok-fn">test</span>(<span class="tok-str">'达到 maxTurns：请求次数有上界'</span>, <span class="tok-kw">async</span> () =&gt; {
+  <span class="tok-kw">const</span> alwaysCallsTool = () =&gt;
+    <span class="tok-fn">reply</span>(<span class="tok-str">'tool_calls'</span>, {
+      tool_calls: [<span class="tok-fn">toolCall</span>(<span class="tok-str">'calculator'</span>, <span class="tok-str">'{"operation":"add","a":1,"b":1}'</span>)],
+    })
+  <span class="tok-kw">const</span> model = <span class="tok-fn">fakeModel</span>(<span class="tok-fn">alwaysCallsTool</span>(), <span class="tok-fn">alwaysCallsTool</span>(), <span class="tok-fn">alwaysCallsTool</span>())
+
+  <span class="tok-kw">const</span> answer = <span class="tok-kw">await</span> <span class="tok-fn">run</span>(<span class="tok-str">'一直算'</span>, { model, maxTurns: <span class="tok-num">3</span> })
+
+  assert.<span class="tok-fn">equal</span>(model.calls.length, <span class="tok-num">3</span>)
+  assert.<span class="tok-fn">equal</span>(answer, <span class="tok-str">''</span>)
+})
+
+<span class="tok-fn">test</span>(<span class="tok-str">'没见过的 finish_reason 且没有工具调用：按停止处理'</span>, <span class="tok-kw">async</span> () =&gt; {
+  <span class="tok-com">// 模拟服务器未来新增了一个取值；判据必须建在「有没有 tool_calls」上</span>
+  <span class="tok-kw">const</span> model = <span class="tok-fn">fakeModel</span>(<span class="tok-fn">reply</span>(<span class="tok-str">'something_new'</span> <span class="tok-kw">as</span> DeepseekChoice[<span class="tok-str">'finish_reason'</span>], { content: <span class="tok-str">''</span> }))
+
+  <span class="tok-kw">const</span> answer = <span class="tok-kw">await</span> <span class="tok-fn">run</span>(<span class="tok-str">'说点什么'</span>, { model })
+
+  assert.<span class="tok-fn">equal</span>(model.calls.length, <span class="tok-num">1</span>)
+  assert.<span class="tok-fn">equal</span>(answer, <span class="tok-str">''</span>)
+})</code></pre>
+</div>
+
+<h3>fake model 的两个设计点</h3>
+
+<p><strong>① 它同时是「响应队列」和「录音机」。</strong>队列负责让模型按剧本说话，录音机负责让你事后检查「<code>run()</code> 到底把什么发给了模型」。很多测试只断言最终答案，那等于只看了考试的最后一题；<strong>断言请求历史，才是在确认完整执行顺序</strong>——这正是 ROADMAP 里那条 checkbox 的本意。</p>
+
+<p><strong>② 记录时必须深拷贝 <code>messages</code>。</strong>这是这一课最容易踩的坑：<code>context.messages</code> 是<strong>同一个可变数组</strong>，第二轮、第三轮还会继续 <code>push</code>。如果你只写 <code>calls.push(params)</code>，那么所有记录都指向同一个数组——测试跑完后去看第一轮的记录，看到的却是最终状态。<strong>录像带必须当场拷贝，事后再看已经晚了。</strong></p>
+
+<div class="callout callout--warn">
+  <span class="callout__label">但不能 <code>structuredClone(params)</code> 整个对象</span>
+  <p><code>params.tools</code> 里的 <code>calculator</code> 带着 <code>execute</code> 函数，而 <code>structuredClone</code> 不能克隆函数。我实测过，会抛：</p>
+  <div class="codeblock"><pre><code>DataCloneError - execute() {} could not be cloned.</code></pre></div>
+  <p>所以只克隆你真正要断言的 <code>messages</code>：<code>{ ...params, messages: structuredClone(params.messages) }</code>。</p>
+</div>
+
+<h3>每个测试在守什么</h3>
+
+<table>
+  <thead><tr><th>测试</th><th>它守的规则</th></tr></thead>
+  <tbody>
+    <tr><td>模型直接回答</td><td>没有工具调用 → 一轮结束，请求里只有一条 user 消息</td></tr>
+    <tr><td>一次工具调用</td><td>协议不变式：角色顺序正确，<code>tool_call_id</code> 对得上，工具结果真的回传了</td></tr>
+    <tr><td>未知工具</td><td>「跳过」不是错误处理；历史长度必须是 3，账要平</td></tr>
+    <tr><td>坏 JSON</td><td>解析失败变成一条 tool 消息，而不是异常冒泡</td></tr>
+    <tr><td>达到 <code>maxTurns</code></td><td>兜底刹车真的生效，请求次数恰好等于上界</td></tr>
+    <tr><td>未知 <code>finish_reason</code></td><td>停止判据不依赖服务器的枚举值</td></tr>
+  </tbody>
+</table>
+
+<h2><span class="num">7</span>动手 ③：跑起来</h2>
+
+<p>把 <code>package.json</code> 里那个占位脚本换掉：</p>
+
+<div class="codeblock">
+  <div class="codeblock__title">mini-agent/package.json</div>
+<pre><code><span class="tok-str">"scripts"</span>: {
+  <span class="tok-str">"start"</span>: <span class="tok-str">"tsx src/index.ts"</span>,
+  <span class="tok-str">"test"</span>: <span class="tok-str">"tsx --test src/*.test.ts"</span>,
+  <span class="tok-str">"lint"</span>: <span class="tok-str">"eslint"</span>,
+  <span class="tok-str">"lint:fix"</span>: <span class="tok-str">"eslint --fix"</span>
+}</code></pre>
+</div>
+
+<div class="codeblock"><pre><code>cd ~/Desktop/pi-learning/mini-agent
+pnpm test</code></pre></div>
+
+<p>预期输出（日志会混在前面，看最后的 <code>✔ / ℹ</code> 部分）：</p>
+
+<div class="codeblock">
+  <div class="codeblock__title">预期输出（本机实测）</div>
+<pre><code>✔ 模型直接回答：一次请求后停止 (1.6ms)
+✔ 一次工具调用：第二轮历史里 tool 消息与 tool_call_id 对上 (0.3ms)
+✔ 未知工具：回一条说明，而不是跳过 (0.2ms)
+✔ 工具参数不是合法 JSON：错误变成 tool 消息，进程不崩 (0.8ms)
+✔ 达到 maxTurns：请求次数有上界 (0.2ms)
+✔ 没见过的 finish_reason 且没有工具调用：按停止处理 (0.1ms)
+ℹ tests 6
+ℹ pass 6
+ℹ fail 0</code></pre>
+</div>
+
+<p>中间那些 <code>Model: … / Tool: … / Finish reason: …</code> 是 <code>logger</code> 打的，属于正常现象——它们本身就是「完整执行顺序」的日志证据。<strong>测试断言和人工日志各管一头：日志给你看过程，测试替你守住不变量。</strong></p>
+
+<div class="callout callout--try">
+  <span class="callout__label">顺手验证「不需要 key」</span>
+  <p>在终端里临时清掉两个环境变量再跑一次：</p>
+  <div class="codeblock"><pre><code>env -u DEEPSEEK_API_KEY -u OPENAI_API_KEY pnpm test</code></pre></div>
+  <p>应该还是 6 个全绿。如果这里挂了，说明还有别的东西在 import 时就碰了真实凭据——那就是下一个要挪走的依赖边界。</p>
+</div>
+
+<h2><span class="num">8</span>选做实验：让测试替你抓 bug</h2>
+
+<p>下面三个实验都不联网。先写测试、看它失败，再改代码。</p>
+
+<h3>实验 A · 除零</h3>
+
+<p>给 <code>agent.test.ts</code> 加一个测试：让模型请求 <code>calculator</code> 执行 <code>5 ÷ 0</code>，断言第二轮历史里的 tool 消息包含 <code>Division by zero</code>，并且 <code>run()</code> 还能拿到模型的最终回答。</p>
+
+<details>
+  <summary>展开参考实现</summary>
+  <div class="codeblock"><pre><code><span class="tok-fn">test</span>(<span class="tok-str">'除零：工具错误回传给模型'</span>, <span class="tok-kw">async</span> () =&gt; {
+  <span class="tok-kw">const</span> model = <span class="tok-fn">fakeModel</span>(
+    <span class="tok-fn">reply</span>(<span class="tok-str">'tool_calls'</span>, {
+      tool_calls: [<span class="tok-fn">toolCall</span>(<span class="tok-str">'calculator'</span>, <span class="tok-str">'{"operation":"divide","a":5,"b":0}'</span>)],
+    }),
+    <span class="tok-fn">reply</span>(<span class="tok-str">'stop'</span>, { content: <span class="tok-str">'不能除以 0'</span> }),
+  )
+
+  <span class="tok-kw">const</span> answer = <span class="tok-kw">await</span> <span class="tok-fn">run</span>(<span class="tok-str">'5 除以 0'</span>, { model })
+
+  assert.<span class="tok-fn">equal</span>(answer, <span class="tok-str">'不能除以 0'</span>)
+  <span class="tok-kw">const</span> toolMessage = model.calls[<span class="tok-num">1</span>].messages[<span class="tok-num">2</span>] <span class="tok-kw">as</span> ChatCompletionToolMessageParam
+  assert.<span class="tok-fn">match</span>(<span class="tok-fn">String</span>(toolMessage.content), <span class="tok-str">/Division by zero/</span>)
+})</code></pre></div>
+  <p>这个测试直接验证了第 2 课实验 A 的结论：<strong>工具的错误有没有变成模型能读到的信息</strong>。</p>
+</details>
+
+<h3>实验 B · 一次回复里两个工具调用</h3>
+
+<p>让模型一次返回两个 <code>tool_calls</code>（比如两次 <code>calculator</code>，<code>id</code> 分别是 <code>call_1</code> / <code>call_2</code>），断言第二轮历史长度是 <strong>4</strong>，并且两条 tool 消息的 <code>tool_call_id</code> 分别对上。</p>
+
+<details>
+  <summary>展开提示</summary>
+  <p>历史应该是：<span class="role role--user">user</span> → <span class="role role--assistant">assistant</span>（带 2 个 tool_calls）→ <span class="role role--tool">tool</span>(<code>call_1</code>) → <span class="role role--tool">tool</span>(<code>call_2</code>)。</p>
+  <p>这个测试守的是第 2 课那条不变式的<strong>复数形式</strong>：不是「至少回一条」，而是<strong>每一个 id 恰好一条</strong>。</p>
+</details>
+
+<h3>实验 C · 故意把账弄不平</h3>
+
+<p>把 <code>toToolMessage</code> 的返回值从 <code>context.messages.push(...)</code> 改成不 push（或者把 <code>for</code> 循环提前 <code>break</code>），再跑测试。</p>
+
+<p>先预测：哪个测试会红？它会报「HTTP 400」吗？</p>
+
+<details>
+  <summary>展开</summary>
+  <p>红的会是「一次工具调用」和「未知工具」两个测试，失败信息是 <code>history.length</code> 不等于 3——<strong>本地断言当场就抓到了</strong>。</p>
+  <p>这正是测试相对真实请求的价值：第 2 课里同样的 bug 要等到<strong>下一轮真实 HTTP 请求</strong>才暴露，而且报错信息不指向病因；在这里，它在 0.3 毫秒内失败，并直接告诉你「历史里少了一条消息」。<strong>把协议不变式写成断言，等于给「隔一轮才爆炸的 bug」装了一个即时警报器。</strong></p>
+</details>
+
+<h2><span class="num">9</span>检查理解</h2>
+
+<p>合上代码，凭记忆回答。</p>
+
+<div class="quiz" data-quiz>
+  <p class="quiz__question">
+    <span class="quiz__index">检查 1 / 3</span>
+    为什么把模型做成 <code>run()</code> 的<strong>参数</strong>，而不是在测试里 mock 整个 <code>openai</code> 模块？
+  </p>
+  <div class="quiz__options">
+    <button class="quiz__option" data-hint="恰恰相反：参数注入是显式的，读调用处就能看到替换发生在哪；模块 mock 才是隐式的。">因为模块 mock 性能更差</button>
+    <button class="quiz__option" data-correct>因为替换点显式、有类型检查，fake 只需要满足一个窄接口</button>
+    <button class="quiz__option" data-hint="Node 内置 runner 也能配合模块 mock；这不是两者的核心区别。">因为 <code>node:test</code> 不支持模块 mock</button>
+    <button class="quiz__option" data-hint="参数注入不是为了让生产代码更短，它反而多了一个接口和默认参数。">因为这样可以减少生产代码的行数</button>
+  </div>
+  <div class="quiz__explain hidden">
+    依赖注入把「用哪个模型」从代码内部挪到了调用处：<code>run(msg, { model: fake })</code> 一眼可见，fake 写错字段编译器会报错。模块 mock 依赖模块路径和加载顺序，测试是否真的替换成功，读代码看不出来。
+  </div>
+  <div class="quiz__feedback"></div>
+</div>
+
+<div class="quiz" data-quiz>
+  <p class="quiz__question">
+    <span class="quiz__index">检查 2 / 3</span>
+    fake model 记录请求时，为什么必须用 <code>structuredClone(params.messages)</code>，而不是直接 <code>calls.push(params)</code>？
+  </p>
+  <div class="quiz__options">
+    <button class="quiz__option" data-hint="<code>structuredClone</code> 和性能无关，这里也不是为了省内存。">为了减少内存占用</button>
+    <button class="quiz__option" data-correct>因为 <code>context.messages</code> 是同一个可变数组，之后还会被 push；不拷贝的话所有记录都指向最终状态</button>
+    <button class="quiz__option" data-hint="类型检查不需要深拷贝；直接 push 同样能通过编译。">为了让 TypeScript 类型检查通过</button>
+    <button class="quiz__option" data-hint="日志和断言记录是两件事；日志不需要保存历史快照。">为了让 logger 能打印每一轮的消息</button>
+  </div>
+  <div class="quiz__explain hidden">
+    <code>run()</code> 全程复用同一个 <code>context.messages</code> 数组。假模型如果只存对象引用，等测试结束时再去看 <code>calls[0]</code>，看到的是被后续轮次追加过的「最终历史」。<strong>录音必须当场拷贝。</strong>
+  </div>
+  <div class="quiz__feedback"></div>
+</div>
+
+<div class="quiz" data-quiz>
+  <p class="quiz__question">
+    <span class="quiz__index">检查 3 / 3</span>
+    下面哪条断言，最能确认「工具调用的完整执行顺序」是正确的？
+  </p>
+  <div class="quiz__options">
+    <button class="quiz__option" data-hint="最终答案对，不代表中间的消息结构对；模型完全可能绕过工具直接心算。">断言 <code>run()</code> 返回的最终回答</button>
+    <button class="quiz__option" data-correct>断言第二轮请求的 <code>messages</code>：角色顺序、<code>tool_call_id</code>、工具返回内容</button>
+    <button class="quiz__option" data-hint="日志是给人看的，测试不会自动检查日志内容；而且日志格式一变断言就碎。">断言 <code>console.warn</code> 打印了几行日志</button>
+    <button class="quiz__option" data-hint="「没抛异常」只能说明没崩，不能说明账平了、顺序对了。">断言 <code>run()</code> 没有抛异常</button>
+  </div>
+  <div class="quiz__explain hidden">
+    最终答案和「没崩」都太粗：一个错误的协议历史也可能碰巧得到正确答案。真正要守的是<strong>发给模型的那份历史</strong>——<span class="role role--user">user</span> → <span class="role role--assistant">assistant</span> → <span class="role role--tool">tool</span> 的顺序、每个 <code>tool_call_id</code> 都有回音、工具结果内容正确。这些断言在真实请求里要等到下一轮 HTTP 400 才会暴露。
+  </div>
+  <div class="quiz__feedback"></div>
+</div>
+
+<p class="quiz__score" data-quiz-score></p>
+
+<h2><span class="num">10</span>勾选与下一步</h2>
+
+<h3>回 ROADMAP 勾选</h3>
+
+<p>这一课对应：</p>
+
+<ul class="checklist">
+  <li>阶段 1 · 用日志或测试确认完整执行顺序</li>
+  <li>阶段 2 · 测试策略：如何在不依赖真实模型的情况下测试核心逻辑</li>
+  <li>阶段 2 建议实验 · 为 Agent Loop 编写至少几个可重复运行的测试</li>
+  <li>阶段 2 建议实验 · 模拟工具失败、连续工具调用和模型直接回答</li>
+</ul>
+
+<p>最后一条里的「连续工具调用」在实验 B/C 里补上；「工具失败」在实验 A 里补上。都跑过再勾。</p>
+
+<h3>下一课：多轮对话</h3>
+
+<p>你现在有了一个<strong>可测试</strong>的一问一答 agent：每次 <code>run()</code> 都从一条 user 消息开始，结束就丢掉历史。下一课把它变成<strong>会话</strong>：</p>
+
+<ul style="margin:.5em 0 .8em;padding-left:1.3em">
+  <li>历史从哪来、存在哪、什么时候该丢；</li>
+  <li>第二次提问时，哪些旧消息必须保留（回顾第 1 课的协议不变式）；</li>
+  <li>用这一课学到的 fake model，测试「连续两问」时历史是否按预期累积。</li>
+</ul>
+
+<p>你会发现这一课投入的测试基础设施，在下一课立刻回本——会话状态最容易出的 bug，恰恰是「历史多了/少了/顺序错了」，而这些都能用 <code>calls[1].messages</code> 断言出来。</p>
+
+<div class="callout callout--source">
+  <span class="callout__label">本课的事实边界</span>
+  <p><strong>我在本机实测过的：</strong>本机 Node <code>v26.11.1</code>、<code>tsx v4.23.13</code>；课件里的 <code>agent.ts</code> / <code>agent.test.ts</code> / <code>index.ts</code> 在临时副本中通过 <code>tsc --noEmit</code> 和 ESLint；6 个测试全绿，耗时约 0.26 秒；在 <code>DEEPSEEK_API_KEY</code> 和 <code>OPENAI_API_KEY</code> 都 unset 的情况下同样全绿；无 key 时 <code>new OpenAI()</code> 会抛 <code>Missing credentials</code>；<code>structuredClone</code> 遇到函数会抛 <code>DataCloneError</code>。</p>
+  <p style="margin-top:.6em"><strong>没有实测的：</strong>我没有用你的 key 向真实 DeepSeek API 发过请求，所以「惰性 client 在真实运行时行为完全不变」是基于代码结构的判断，不是线上结果；第 2 课实验 C 里模型面对工具失败的实际回答，仍然需要你跑一次真模型才能知道。</p>
+</div>
+
+<div class="callout callout--source">
+  <span class="callout__label">参考资料</span>
+  <p><strong>必读</strong>：<a href="https://nodejs.org/api/test.html">Node.js — Test runner</a>。重点看 <code>test()</code>、<code>assert</code> 和 <code>--test</code> 的文件匹配规则。</p>
+  <p style="margin-top:.7em"><strong>接着读</strong>：<a href="https://tsx.is/getting-started">tsx — Getting Started</a>，确认 <code>tsx --test</code> 是如何把 TypeScript 交给 Node runner 的。</p>
+</div>
+
+</main>
+
+<footer class="lesson-footer">
+  <p><strong>一个建议：</strong>先把 6 个测试原样跑通，再去做实验 C。看着自己亲手拆掉一行代码、测试在 0.3 毫秒内变红——那一刻你才会真正相信这套东西的价值。</p>
+  <ul class="lesson-nav">
+    <li><a href="0002-loop-guardrails.html">第 2 课 · 给循环装上刹车与兜底</a></li>
+    <li><a href="0001-tool-call-roundtrip.html">第 1 课 · 工具调用的完整往返</a></li>
+    <li><a href="../reference/agent-loop.html">速查 · Agent Loop 骨架</a></li>
+    <li><a href="../../ROADMAP.md">总路线图</a></li>
+  </ul>
+</footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
