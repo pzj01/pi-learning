@@ -1,17 +1,17 @@
-import {
-  ChatCompletionTool,
+import type {
+  ChatCompletionMessageFunctionToolCall,
   ChatCompletionMessageToolCall,
-  ChatCompletionMessageFunctionToolCall
+  ChatCompletionTool,
 } from 'openai/resources/chat/completions'
 
 interface Executable<T, R> {
-  execute(params: T): Promise<R>
+  execute: (params: T) => Promise<R>
 }
 
 interface CalculatorParams {
-  operation: 'add' | 'subtract' | 'multiply' | 'divide';
-  a: number;
-  b: number;
+  operation: 'add' | 'subtract' | 'multiply' | 'divide'
+  a: number
+  b: number
 }
 
 export const calculator: ChatCompletionTool & Executable<CalculatorParams, number> = {
@@ -40,20 +40,23 @@ export const calculator: ChatCompletionTool & Executable<CalculatorParams, numbe
     },
   },
   async execute(params: CalculatorParams) {
-    const { operation, a, b } = params;
+    const { operation, a, b } = params
     switch (operation) {
       case 'add':
-        return a + b;
+        return a + b
       case 'subtract':
-        return a - b;
+        return a - b
       case 'multiply':
-        return a * b;
+        return a * b
       case 'divide':
-        return a / b;
+        if (b === 0) {
+          throw new Error('Division by zero is not allowed.')
+        }
+        return a / b
       default:
-        throw new Error(`Unknown operation: ${operation}`);
+        throw new Error(`Unknown operation: ${operation}`)
     }
-  }
+  },
 }
 
 export const tools = [calculator]
@@ -78,7 +81,7 @@ export async function executeTool(toolCall: ChatCompletionMessageToolCall): Prom
   if (!isFunctionToolCall(toolCall)) {
     return {
       ok: false,
-      error: new Error('Invalid tool call')
+      error: new Error('Invalid tool call'),
     }
   }
 
@@ -88,10 +91,11 @@ export async function executeTool(toolCall: ChatCompletionMessageToolCall): Prom
     let params: any
     try {
       params = JSON.parse(toolCall.function.arguments)
-    } catch (error) {
+    }
+    catch (error) {
       return {
         ok: false,
-        error: new Error('Invalid tool call arguments')
+        error: new Error('Invalid tool call arguments', { cause: error }),
       }
     }
 
@@ -99,18 +103,20 @@ export async function executeTool(toolCall: ChatCompletionMessageToolCall): Prom
       const result = await tool.execute(params)
       return {
         ok: true,
-        content: result.toString()
-      }
-    }catch (error) {
-      return {
-        ok: false,
-        error: error instanceof Error ? error : new Error('Unknown error during tool execution')
+        content: result.toString(),
       }
     }
-  } else {
+    catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error : new Error('Unknown error during tool execution'),
+      }
+    }
+  }
+  else {
     return {
       ok: false,
-      error: new Error('Tool not found')
+      error: new Error('Tool not found'),
     }
   }
 }
